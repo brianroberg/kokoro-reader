@@ -1,0 +1,26 @@
+# Virtual environment
+.venv/
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Audio output files
+*.wav
+*.mp3
+*.m4a
+
+# Temporary files
+*.tmp
+temp_*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
