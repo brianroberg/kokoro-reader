@@ -9,9 +9,9 @@ import os
 import sys
 import re
 import tempfile
+import warnings
 from pathlib import Path
-from typing import List, Optional
-import torch
+from typing import List
 import soundfile as sf
 from pydub import AudioSegment
 from kokoro import KPipeline
@@ -168,7 +168,12 @@ Examples:
         # Initialize Kokoro pipeline
         print("Initializing Kokoro TTS pipeline...")
         device = None if args.device == "auto" else args.device
-        pipeline = KPipeline(lang_code=args.lang, device=device)
+        
+        # Suppress warnings from the Kokoro library
+        warnings.filterwarnings("ignore", category=UserWarning, module="torch.nn.modules.rnn")
+        warnings.filterwarnings("ignore", category=FutureWarning, module="torch.nn.utils.weight_norm")
+        
+        pipeline = KPipeline(lang_code=args.lang, device=device, repo_id='hexgrad/Kokoro-82M')
         
         # Create temporary directory for audio chunks
         temp_dir = tempfile.mkdtemp(prefix="kokoro_tts_")
