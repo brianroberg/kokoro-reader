@@ -61,6 +61,61 @@ def clean_markdown_text(text: str) -> str:
     return text.strip()
 
 
+def list_available_voices():
+    """List all available voices organized by language."""
+    voices = {
+        'American English (lang: a)': {
+            'Female': ['af_alloy', 'af_aoede', 'af_bella', 'af_heart', 'af_jessica', 
+                      'af_kore', 'af_nicole', 'af_nova', 'af_river', 'af_sarah', 'af_sky'],
+            'Male': ['am_adam', 'am_echo', 'am_eric', 'am_fenrir', 'am_liam', 
+                    'am_michael', 'am_onyx', 'am_puck', 'am_santa']
+        },
+        'British English (lang: b)': {
+            'Female': ['bf_alice', 'bf_emma', 'bf_isabella', 'bf_lily'],
+            'Male': ['bm_daniel', 'bm_fable', 'bm_george', 'bm_lewis']
+        },
+        'Spanish (lang: e)': {
+            'Female': ['ef_dora'],
+            'Male': ['em_alex', 'em_santa']
+        },
+        'French (lang: f)': {
+            'Female': ['ff_siwis'],
+            'Male': []
+        },
+        'Hindi (lang: h)': {
+            'Female': ['hf_alpha', 'hf_beta'],
+            'Male': ['hm_omega', 'hm_psi']
+        },
+        'Italian (lang: i)': {
+            'Female': ['if_sara'],
+            'Male': ['im_nicola']
+        },
+        'Japanese (lang: j)': {
+            'Female': ['jf_alpha', 'jf_gongitsune', 'jf_nezumi', 'jf_tebukuro'],
+            'Male': ['jm_kumo']
+        },
+        'Portuguese (lang: p)': {
+            'Female': ['pf_dora'],
+            'Male': ['pm_alex', 'pm_santa']
+        },
+        'Chinese (lang: z)': {
+            'Female': ['zf_xiaobei', 'zf_xiaoni', 'zf_xiaoxiao', 'zf_xiaoyi'],
+            'Male': ['zm_yunjian', 'zm_yunxi', 'zm_yunxia', 'zm_yunyang']
+        }
+    }
+    
+    print("Available Voices by Language:\n")
+    for language, genders in voices.items():
+        print(f"🗣️  {language}")
+        for gender, voice_list in genders.items():
+            if voice_list:
+                print(f"   {gender}: {', '.join(voice_list)}")
+        print()
+    
+    print("Usage: python text_to_speech.py document.txt --voice VOICE_NAME --lang LANG_CODE")
+    print("Example: python text_to_speech.py document.txt --voice af_bella --lang a")
+
+
 def concatenate_audio_files(audio_files: List[str], output_path: str) -> None:
     """Concatenate multiple audio files into one."""
     if not audio_files:
@@ -91,6 +146,7 @@ Examples:
     
     parser.add_argument(
         "input_file",
+        nargs="?",
         help="Input text file (supports .txt, .md, and other text formats)"
     )
     
@@ -131,13 +187,30 @@ Examples:
         help="Keep temporary audio chunk files for debugging"
     )
     
+    parser.add_argument(
+        "--list-voices",
+        action="store_true",
+        help="List all available voices and exit"
+    )
+    
     args = parser.parse_args()
+    
+    # Handle --list-voices option
+    if args.list_voices:
+        list_available_voices()
+        sys.exit(0)
+    
+    # Validate input file is provided
+    if not args.input_file:
+        print("Error: Input file is required (unless using --list-voices)", file=sys.stderr)
+        parser.print_help()
+        sys.exit(1)
     
     # Set environment variable for Apple Silicon MPS support
     if args.device in ["auto", "mps"]:
         os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
     
-    # Validate input file
+    # Validate input file exists
     if not os.path.exists(args.input_file):
         print(f"Error: Input file '{args.input_file}' not found.", file=sys.stderr)
         sys.exit(1)
@@ -180,10 +253,15 @@ Examples:
         temp_files = []
         
         try:
-            print("Generating audio chunks...")
+            # First pass: count total chunks without generating audio
+            print("Analyzing text and counting chunks...")
+            quiet_pipeline = KPipeline(lang_code=args.lang, model=False, repo_id='hexgrad/Kokoro-82M')
+            total_chunks = sum(1 for _ in quiet_pipeline(text, voice=None, speed=args.speed))
+            
+            print(f"Generating {total_chunks} audio chunks...")
             chunk_count = 0
             
-            # Generate audio using pipeline's built-in chunking
+            # Second pass: generate audio using pipeline's built-in chunking
             for result in pipeline(text, voice=args.voice, speed=args.speed):
                 if result.audio is not None:
                     # Save chunk to temporary file
@@ -191,7 +269,8 @@ Examples:
                     sf.write(chunk_path, result.audio.numpy(), 24000)
                     temp_files.append(chunk_path)
                     chunk_count += 1
-                    print(f"Generated chunk {chunk_count}: {len(result.graphemes)} chars")
+                    progress = (chunk_count / total_chunks) * 100
+                    print(f"Generated chunk {chunk_count}/{total_chunks} ({progress:.1f}%): {len(result.graphemes)} chars")
             
             if not temp_files:
                 print("Error: No audio was generated.", file=sys.stderr)
