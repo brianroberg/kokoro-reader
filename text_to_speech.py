@@ -4,8 +4,11 @@ Text-to-Speech script using Kokoro TTS library.
 Converts text files (including Markdown) to audio using chunking for long texts.
 """
 
-import argparse
 import os
+# Set MPS fallback BEFORE importing torch-related modules
+os.environ.setdefault('PYTORCH_ENABLE_MPS_FALLBACK', '1')
+
+import argparse
 import sys
 import re
 import tempfile
@@ -206,9 +209,7 @@ Examples:
         parser.print_help()
         sys.exit(1)
     
-    # Set environment variable for Apple Silicon MPS support
-    if args.device in ["auto", "mps"]:
-        os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
+    # Note: MPS fallback environment variable is set at the top of the script
     
     # Validate input file exists
     if not os.path.exists(args.input_file):
@@ -240,13 +241,42 @@ Examples:
         
         # Initialize Kokoro pipeline
         print("Initializing Kokoro TTS pipeline...")
-        device = None if args.device == "auto" else args.device
+        
+        # Determine the best device to use
+        if args.device == "auto":
+            import torch
+            if torch.cuda.is_available():
+                device = 'cuda'
+                print("Auto-selected CUDA for GPU acceleration")
+            elif torch.backends.mps.is_available() and os.environ.get('PYTORCH_ENABLE_MPS_FALLBACK') == '1':
+                device = 'mps'
+                print("Auto-selected MPS for Apple Silicon acceleration")
+            else:
+                device = 'cpu'
+                print("Auto-selected CPU (no GPU acceleration available)")
+        else:
+            device = args.device
+            print(f"Using explicitly specified device: {device}")
         
         # Suppress warnings from the Kokoro library
         warnings.filterwarnings("ignore", category=UserWarning, module="torch.nn.modules.rnn")
         warnings.filterwarnings("ignore", category=FutureWarning, module="torch.nn.utils.weight_norm")
         
         pipeline = KPipeline(lang_code=args.lang, device=device, repo_id='hexgrad/Kokoro-82M')
+        
+        # Debug: Check what device is actually being used
+        if pipeline.model:
+            actual_device = next(pipeline.model.parameters()).device
+            print(f"Model loaded on device: {actual_device}")
+            
+            # Check MPS availability and settings
+            import torch
+            print(f"MPS available: {torch.backends.mps.is_available()}")
+            print(f"MPS fallback enabled: {os.environ.get('PYTORCH_ENABLE_MPS_FALLBACK', 'Not set')}")
+            if hasattr(torch.backends.mps, 'is_built'):
+                print(f"MPS built: {torch.backends.mps.is_built()}")
+        else:
+            print("No model loaded (quiet pipeline)")
         
         # Create temporary directory for audio chunks
         temp_dir = tempfile.mkdtemp(prefix="kokoro_tts_")
