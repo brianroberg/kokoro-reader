@@ -1,6 +1,6 @@
 # Kokoro Text-to-Speech Script
 
-A Python script that converts text files (including Markdown) to high-quality audio using the [Kokoro TTS library](https://github.com/hexgrad/Kokoro-82M). The script automatically handles text chunking for long documents and combines the audio chunks into a single output file.
+A Python script that converts text files (including Markdown) to high-quality audio using the [Kokoro TTS library](https://github.com/hexgrad/Kokoro). The script automatically handles text chunking for long documents and combines the audio chunks into a single output file.
 
 I wrote this script using [Claude Code](https://claude.ai/code).
 
@@ -32,7 +32,7 @@ I wrote this script using [Claude Code](https://claude.ai/code).
 4. **Install system dependencies** (if needed):
    - **macOS**: No additional setup required
    - **Linux**: `sudo apt-get install espeak-ng`
-   - **Windows**: Download and install [espeak-ng](https://github.com/espeak-ng/espeak-ng/releases)
+   - **Windows**: Download and install [espeak-ng](https://github.com/espeak-ng/espeak-ng)
 
 ## Usage
 
