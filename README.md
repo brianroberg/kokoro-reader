@@ -10,6 +10,7 @@ A Python script that converts text files (including Markdown) to high-quality au
 - 🔧 **Flexible Options**: Multiple voices, languages, and speed controls
 - 🚀 **Apple Silicon Optimized**: Automatically enables MPS acceleration on M1/M2/M3/M4 Macs
 - 📁 **Multiple Formats**: Supports various text file encodings and formats
+- 🔄 **Stdin Support**: Read from pipes for Unix-style text processing workflows
 
 ## Installation
 
@@ -41,6 +42,13 @@ python text_to_speech.py document.txt
 
 # Convert a markdown file
 python text_to_speech.py README.md
+
+# Read from stdin (pipe or redirect)
+echo "Hello world!" | python text_to_speech.py
+cat document.txt | python text_to_speech.py
+
+# Read markdown from stdin
+cat README.md | python text_to_speech.py --markdown
 ```
 
 ### Advanced Usage
@@ -60,18 +68,28 @@ python text_to_speech.py documento.txt --lang e --voice ef_dora  # Spanish
 
 # Force CPU usage (disable GPU acceleration)
 python text_to_speech.py document.txt --device cpu
+
+# Process only part of a document (Unix-style)
+head -n 20 long_document.txt | python text_to_speech.py
+head -c 1000 README.md | python text_to_speech.py --markdown
+
+# Extract and convert specific sections
+grep -A 10 "Introduction" document.md | python text_to_speech.py --markdown
 ```
 
 ### Command Line Options
 
 | Option | Short | Description | Default |
 |--------|-------|-------------|---------|
-| `--output` | `-o` | Output audio file path | `input_filename.wav` |
+| `input_file` | | Input text file, or `-` for stdin | (required unless using stdin) |
+| `--output` | `-o` | Output audio file path | `input_filename.wav` or `output.wav` |
 | `--voice` | `-v` | Voice to use for TTS | `af_heart` |
 | `--speed` | `-s` | Speech speed multiplier | `1.0` |
 | `--lang` | `-l` | Language code | `a` (American English) |
+| `--markdown` | `-m` | Treat input as markdown | auto-detect for `.md` files |
 | `--device` | | Device for inference | `auto` |
 | `--keep-temp` | | Keep temporary chunk files | `false` |
+| `--list-voices` | | Show all available voices | |
 
 ### Available Voices
 
@@ -114,6 +132,32 @@ The script supports all Kokoro voices. Some popular options:
 3. **Audio Generation**: Converts each chunk to audio using the Kokoro TTS model
 4. **Concatenation**: Combines all audio chunks into a single output file with natural pauses
 
+## Markdown Processing
+
+When processing Markdown files (`.md`, `.markdown`), the script automatically cleans the text for better TTS output by removing:
+
+- **Headers** (`# ## ###`) - formatting removed, text preserved
+- **Images** (`![alt text](url)`) - completely removed including alt text
+- **Links** (`[text](url)`) - URLs removed, link text preserved
+- **Emphasis** (`*italic*`, `**bold**`) - formatting removed, text preserved
+- **Code blocks** and `inline code` - removed entirely
+- **Lists** (`- item`, `1. item`) - bullet/numbering removed, text preserved
+- **Blockquotes** (`> text`) - formatting removed, text preserved
+
+**Example transformation:**
+```markdown
+# My Document
+Here's an image: ![Screenshot](image.png)
+Check out this [link](https://example.com) for more info.
+```
+
+Becomes:
+```
+My Document
+Here's an image: 
+Check out this link for more info.
+```
+
 ## Examples
 
 ### Convert a Simple Text File
@@ -126,6 +170,18 @@ python text_to_speech.py story.txt
 ```bash
 python text_to_speech.py README.md --voice af_bella --output readme_audio.wav
 # Output: readme_audio.wav (with cleaned markdown formatting)
+```
+
+### Process Text from Stdin
+```bash
+# Convert piped text
+echo "Welcome to our documentation" | python text_to_speech.py --voice af_sarah
+
+# Process first 500 characters of a long document
+head -c 500 long_document.txt | python text_to_speech.py --output preview.wav
+
+# Convert specific sections using grep
+grep -A 20 "Installation" README.md | python text_to_speech.py --markdown --output install_guide.wav
 ```
 
 ### Spanish Text with Spanish Voice

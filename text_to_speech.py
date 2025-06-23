@@ -39,6 +39,9 @@ def clean_markdown_text(text: str) -> str:
     # Remove markdown headers
     text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
     
+    # Remove markdown images completely (including alt text)
+    text = re.sub(r'!\[([^\]]*)\]\([^\)]+\)', '', text)
+    
     # Remove markdown links but keep the text
     text = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', text)
     
@@ -150,7 +153,7 @@ Examples:
     parser.add_argument(
         "input_file",
         nargs="?",
-        help="Input text file (supports .txt, .md, and other text formats)"
+        help="Input text file (supports .txt, .md, and other text formats). Use '-' or omit to read from stdin."
     )
     
     parser.add_argument(
@@ -196,6 +199,12 @@ Examples:
         help="List all available voices and exit"
     )
     
+    parser.add_argument(
+        "--markdown", "-m",
+        action="store_true",
+        help="Treat input as markdown and clean formatting (auto-detected for .md/.markdown files)"
+    )
+    
     args = parser.parse_args()
     
     # Handle --list-voices option
@@ -203,33 +212,47 @@ Examples:
         list_available_voices()
         sys.exit(0)
     
-    # Validate input file is provided
-    if not args.input_file:
-        print("Error: Input file is required (unless using --list-voices)", file=sys.stderr)
-        parser.print_help()
-        sys.exit(1)
-    
     # Note: MPS fallback environment variable is set at the top of the script
     
-    # Validate input file exists
-    if not os.path.exists(args.input_file):
+    # Determine if reading from stdin
+    reading_from_stdin = not args.input_file or args.input_file == '-'
+    
+    # Validate input
+    if not reading_from_stdin and not os.path.exists(args.input_file):
         print(f"Error: Input file '{args.input_file}' not found.", file=sys.stderr)
+        sys.exit(1)
+    
+    # Check if stdin has data when reading from stdin
+    if reading_from_stdin and sys.stdin.isatty():
+        print("Error: No input provided. Specify a file or pipe text to stdin.", file=sys.stderr)
+        print("Examples:")
+        print("  python text_to_speech.py document.txt")
+        print("  echo 'Hello world' | python text_to_speech.py")
+        print("  head -n 10 document.txt | python text_to_speech.py")
         sys.exit(1)
     
     # Determine output path
     if args.output:
         output_path = args.output
+    elif reading_from_stdin:
+        output_path = "output.wav"
     else:
         input_path = Path(args.input_file)
         output_path = str(input_path.with_suffix('.wav'))
     
     try:
         # Read and clean the text
-        print("Reading input file...")
-        text = read_text_file(args.input_file)
+        if reading_from_stdin:
+            print("Reading from stdin...")
+            text = sys.stdin.read()
+            is_markdown = args.markdown
+        else:
+            print("Reading input file...")
+            text = read_text_file(args.input_file)
+            is_markdown = args.markdown or args.input_file.lower().endswith(('.md', '.markdown'))
         
-        # Clean markdown if the file appears to be markdown
-        if args.input_file.lower().endswith(('.md', '.markdown')):
+        # Clean markdown if specified or auto-detected
+        if is_markdown:
             print("Cleaning markdown formatting...")
             text = clean_markdown_text(text)
         
