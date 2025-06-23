@@ -231,7 +231,7 @@ This script is provided under the MIT License. The Kokoro TTS model has its own 
 
 ## Acknowledgments
 
-- [Kokoro TTS](https://github.com/hexgrad/Kokoro-82M) - The excellent open-source TTS model
+- [Kokoro TTS](https://github.com/hexgrad/Kokoro) - The excellent open-source TTS model
 - [StyleTTS 2](https://github.com/yl4579/StyleTTS2) - The underlying architecture
 - All contributors to the Kokoro project
 
