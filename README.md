@@ -2,6 +2,8 @@
 
 A Python script that converts text files (including Markdown) to high-quality audio using the [Kokoro TTS library](https://github.com/hexgrad/Kokoro-82M). The script automatically handles text chunking for long documents and combines the audio chunks into a single output file.
 
+I wrote this script using [Claude Code](https://claude.ai/code).
+
 ## Features
 
 - 🎯 **Smart Text Processing**: Automatically chunks long texts into manageable pieces
