@@ -1,6 +1,8 @@
 # Kokoro Text-to-Speech Script
 
-A Python script that converts text files (including Markdown) to high-quality audio using the [Kokoro TTS library](https://github.com/hexgrad/Kokoro). The script automatically handles text chunking for long documents and combines the audio chunks into a single output file.
+A Python script that converts text files (including Markdown) to high-quality audio using [MLX Audio](https://github.com/Blaizzy/mlx-audio) and the [Kokoro-82M model](https://huggingface.co/mlx-community/Kokoro-82M-bf16). The script automatically handles text chunking for long documents and combines the audio chunks into a single output file.
+
+**Requires Apple Silicon (M1/M2/M3/M4 Mac).**
 
 I wrote this script using [Claude Code](https://claude.ai/code).
 
@@ -10,9 +12,15 @@ I wrote this script using [Claude Code](https://claude.ai/code).
 - 📝 **Markdown Support**: Cleans markdown formatting for better TTS output
 - 🎵 **High-Quality Audio**: Uses Kokoro-82M, an 82-million parameter TTS model
 - 🔧 **Flexible Options**: Multiple voices, languages, and speed controls
-- 🚀 **Apple Silicon Optimized**: Automatically enables MPS acceleration on M1/M2/M3/M4 Macs
+- 🚀 **Native Apple Silicon**: Uses MLX framework for fast inference on M1/M2/M3/M4 Macs
 - 📁 **Multiple Formats**: Supports various text file encodings and formats
 - 🔄 **Stdin Support**: Read from pipes for Unix-style text processing workflows
+
+## Requirements
+
+- **Apple Silicon Mac** (M1, M2, M3, or M4)
+- **Python 3.10+**
+- **macOS** (MLX framework is Apple Silicon only)
 
 ## Installation
 
@@ -21,18 +29,13 @@ I wrote this script using [Claude Code](https://claude.ai/code).
 2. **Set up a Python virtual environment** (recommended):
    ```bash
    python -m venv .venv
-   source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+   source .venv/bin/activate
    ```
 
 3. **Install dependencies**:
    ```bash
-   pip install kokoro soundfile pydub
+   pip install mlx-audio soundfile pydub
    ```
-
-4. **Install system dependencies** (if needed):
-   - **macOS**: No additional setup required
-   - **Linux**: `sudo apt-get install espeak-ng`
-   - **Windows**: Download and install [espeak-ng](https://github.com/espeak-ng/espeak-ng)
 
 ## Usage
 
@@ -68,9 +71,6 @@ python text_to_speech.py document.txt --speed 1.2
 # Use different language
 python text_to_speech.py documento.txt --lang e --voice ef_dora  # Spanish
 
-# Force CPU usage (disable GPU acceleration)
-python text_to_speech.py document.txt --device cpu
-
 # Process only part of a document (Unix-style)
 head -n 20 long_document.txt | python text_to_speech.py
 head -c 1000 README.md | python text_to_speech.py --markdown
@@ -89,7 +89,6 @@ grep -A 10 "Introduction" document.md | python text_to_speech.py --markdown
 | `--speed` | `-s` | Speech speed multiplier | `1.0` |
 | `--lang` | `-l` | Language code | `a` (American English) |
 | `--markdown` | `-m` | Treat input as markdown | auto-detect for `.md` files |
-| `--device` | | Device for inference | `auto` |
 | `--keep-temp` | | Keep temporary chunk files | `false` |
 | `--list-voices` | | Show all available voices | |
 
@@ -131,7 +130,7 @@ The script supports all Kokoro voices. Some popular options:
 
 1. **Text Processing**: Reads the input file and cleans markdown formatting if applicable
 2. **Chunking**: Automatically splits long text into smaller chunks suitable for the TTS model
-3. **Audio Generation**: Converts each chunk to audio using the Kokoro TTS model
+3. **Audio Generation**: Converts each chunk to audio using MLX Audio with the Kokoro-82M model
 4. **Concatenation**: Combines all audio chunks into a single output file with natural pauses
 
 ## Markdown Processing
@@ -194,14 +193,11 @@ python text_to_speech.py documento.txt --lang e --voice ef_dora --speed 0.9
 
 ## System Requirements
 
-- **Python**: 3.8 or higher
-- **OS**: macOS, Linux, or Windows
+- **Hardware**: Apple Silicon Mac (M1, M2, M3, or M4)
+- **Python**: 3.10 or higher
+- **OS**: macOS only (MLX is Apple Silicon native)
 - **Memory**: At least 4GB RAM recommended
-- **Storage**: ~2GB for model weights (downloaded automatically)
-
-### Apple Silicon Optimization
-
-On M1/M2/M3/M4 Macs, the script automatically enables MPS (Metal Performance Shaders) acceleration by setting `PYTORCH_ENABLE_MPS_FALLBACK=1`. This provides significant speed improvements over CPU-only inference.
+- **Storage**: ~500MB for model weights (downloaded automatically)
 
 ## Troubleshooting
 
@@ -209,22 +205,14 @@ On M1/M2/M3/M4 Macs, the script automatically enables MPS (Metal Performance Sha
 
 **"Module not found" errors**:
 ```bash
-pip install kokoro soundfile pydub
+pip install mlx-audio soundfile pydub
 ```
 
-**"espeak-ng not found" warnings**:
-- macOS: Usually works without espeak-ng
-- Linux: `sudo apt-get install espeak-ng`
-- Windows: Install from [releases page](https://github.com/espeak-ng/espeak-ng/releases)
-
-**CUDA out of memory**:
-```bash
-python text_to_speech.py document.txt --device cpu
-```
+**"mlx not supported" or platform errors**:
+MLX Audio requires an Apple Silicon Mac. This script does not support Intel Macs, Linux, or Windows.
 
 **Long processing times**:
 - Try using a smaller text file first
-- Use `--device cpu` if GPU memory is limited
 - Consider splitting very large documents manually
 
 ## License
@@ -233,9 +221,10 @@ This script is provided under the MIT License. The Kokoro TTS model has its own 
 
 ## Acknowledgments
 
+- [MLX Audio](https://github.com/Blaizzy/mlx-audio) - MLX-native audio processing library
 - [Kokoro TTS](https://github.com/hexgrad/Kokoro) - The excellent open-source TTS model
 - [StyleTTS 2](https://github.com/yl4579/StyleTTS2) - The underlying architecture
-- All contributors to the Kokoro project
+- [Apple MLX](https://github.com/ml-explore/mlx) - Machine learning framework for Apple Silicon
 
 ## Contributing
 

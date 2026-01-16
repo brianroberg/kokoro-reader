@@ -12,6 +12,7 @@ from unittest.mock import patch, mock_open, MagicMock
 import unittest.mock
 import sys
 from io import StringIO
+import numpy as np
 
 # Import functions from the script
 from text_to_speech import (
@@ -347,6 +348,91 @@ def test_markdown_cleaning_parametrized(input_text, expected_contains, expected_
     
     for not_expected in expected_not_contains:
         assert not_expected not in result
+
+
+class TestMLXAudioBackend:
+    """Tests for MLX Audio backend functionality."""
+
+    @pytest.fixture(scope="class")
+    def model(self):
+        """Load the MLX Audio model (cached for test class)."""
+        from mlx_audio.tts.utils import load_model
+        return load_model("mlx-community/Kokoro-82M-bf16")
+
+    def test_model_loads_successfully(self, model):
+        """Test that the MLX Audio model loads without errors."""
+        assert model is not None
+
+    def test_generate_returns_iterator(self, model):
+        """Test that model.generate() returns an iterable."""
+        result = model.generate(
+            text="Hello world.",
+            voice="af_heart",
+            speed=1.0,
+            lang_code="a"
+        )
+        # Should be iterable
+        assert hasattr(result, '__iter__')
+
+    def test_generate_produces_audio(self, model):
+        """Test that model.generate() produces audio output."""
+        chunks = list(model.generate(
+            text="Hello world.",
+            voice="af_heart",
+            speed=1.0,
+            lang_code="a"
+        ))
+
+        assert len(chunks) > 0
+
+        # First chunk should have audio
+        first_chunk = chunks[0]
+        assert first_chunk.audio is not None
+
+        # Should be convertible to numpy array
+        audio_array = np.array(first_chunk.audio)
+        assert len(audio_array) > 0
+
+    def test_different_voices_work(self, model):
+        """Test that different voice options work."""
+        voices = ["af_heart", "am_adam", "bf_emma"]
+
+        for voice in voices:
+            chunks = list(model.generate(
+                text="Test.",
+                voice=voice,
+                speed=1.0,
+                lang_code="a" if voice.startswith("a") else "b"
+            ))
+            assert len(chunks) > 0
+            assert chunks[0].audio is not None
+
+    def test_speed_parameter_accepted(self, model):
+        """Test that speed parameter is accepted without error."""
+        # Test slow and fast speeds
+        for speed in [0.8, 1.0, 1.2]:
+            chunks = list(model.generate(
+                text="Test.",
+                voice="af_heart",
+                speed=speed,
+                lang_code="a"
+            ))
+            assert len(chunks) > 0
+
+    def test_long_text_produces_chunks(self, model):
+        """Test that long text produces audio chunks."""
+        long_text = "This is a test sentence. " * 20
+
+        chunks = list(model.generate(
+            text=long_text,
+            voice="af_heart",
+            speed=1.0,
+            lang_code="a"
+        ))
+
+        # Long text should produce at least one chunk with audio
+        assert len(chunks) >= 1
+        assert chunks[0].audio is not None
 
 
 if __name__ == "__main__":

@@ -1,23 +1,21 @@
 #!/usr/bin/env python3
 """
-Text-to-Speech script using Kokoro TTS library.
+Text-to-Speech script using MLX Audio library.
 Converts text files (including Markdown) to audio using chunking for long texts.
+Optimized for Apple Silicon (M1/M2/M3/M4 Macs).
 """
-
-import os
-# Set MPS fallback BEFORE importing torch-related modules
-os.environ.setdefault('PYTORCH_ENABLE_MPS_FALLBACK', '1')
 
 import argparse
 import sys
+import os
 import re
 import tempfile
-import warnings
 from pathlib import Path
 from typing import List
+import numpy as np
 import soundfile as sf
 from pydub import AudioSegment
-from kokoro import KPipeline
+from mlx_audio.tts.utils import load_model
 
 
 def read_text_file(file_path: str) -> str:
@@ -140,7 +138,7 @@ def concatenate_audio_files(audio_files: List[str], output_path: str) -> None:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Convert text files to speech using Kokoro TTS",
+        description="Convert text files to speech using MLX Audio (Apple Silicon optimized)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -181,13 +179,6 @@ Examples:
     )
     
     parser.add_argument(
-        "--device",
-        choices=["auto", "cpu", "cuda", "mps"],
-        default="auto",
-        help="Device to use for inference (default: auto)"
-    )
-    
-    parser.add_argument(
         "--keep-temp",
         action="store_true",
         help="Keep temporary audio chunk files for debugging"
@@ -211,9 +202,7 @@ Examples:
     if args.list_voices:
         list_available_voices()
         sys.exit(0)
-    
-    # Note: MPS fallback environment variable is set at the top of the script
-    
+
     # Determine if reading from stdin
     reading_from_stdin = not args.input_file or args.input_file == '-'
     
@@ -261,69 +250,34 @@ Examples:
             sys.exit(1)
         
         print(f"Text length: {len(text)} characters")
-        
-        # Initialize Kokoro pipeline
-        print("Initializing Kokoro TTS pipeline...")
-        
-        # Determine the best device to use
-        if args.device == "auto":
-            import torch
-            if torch.cuda.is_available():
-                device = 'cuda'
-                print("Auto-selected CUDA for GPU acceleration")
-            elif torch.backends.mps.is_available() and os.environ.get('PYTORCH_ENABLE_MPS_FALLBACK') == '1':
-                device = 'mps'
-                print("Auto-selected MPS for Apple Silicon acceleration")
-            else:
-                device = 'cpu'
-                print("Auto-selected CPU (no GPU acceleration available)")
-        else:
-            device = args.device
-            print(f"Using explicitly specified device: {device}")
-        
-        # Suppress warnings from the Kokoro library
-        warnings.filterwarnings("ignore", category=UserWarning, module="torch.nn.modules.rnn")
-        warnings.filterwarnings("ignore", category=FutureWarning, module="torch.nn.utils.weight_norm")
-        
-        pipeline = KPipeline(lang_code=args.lang, device=device, repo_id='hexgrad/Kokoro-82M')
-        
-        # Debug: Check what device is actually being used
-        if pipeline.model:
-            actual_device = next(pipeline.model.parameters()).device
-            print(f"Model loaded on device: {actual_device}")
-            
-            # Check MPS availability and settings
-            import torch
-            print(f"MPS available: {torch.backends.mps.is_available()}")
-            print(f"MPS fallback enabled: {os.environ.get('PYTORCH_ENABLE_MPS_FALLBACK', 'Not set')}")
-            if hasattr(torch.backends.mps, 'is_built'):
-                print(f"MPS built: {torch.backends.mps.is_built()}")
-        else:
-            print("No model loaded (quiet pipeline)")
-        
+
+        # Initialize MLX Audio model (Apple Silicon optimized)
+        print("Initializing MLX Audio TTS model...")
+        model = load_model("mlx-community/Kokoro-82M-bf16")
+        print("Model loaded on MLX (Apple Silicon)")
+
         # Create temporary directory for audio chunks
         temp_dir = tempfile.mkdtemp(prefix="kokoro_tts_")
         temp_files = []
-        
+
         try:
-            # First pass: count total chunks without generating audio
-            print("Analyzing text and counting chunks...")
-            quiet_pipeline = KPipeline(lang_code=args.lang, model=False, repo_id='hexgrad/Kokoro-82M')
-            total_chunks = sum(1 for _ in quiet_pipeline(text, voice=None, speed=args.speed))
-            
-            print(f"Generating {total_chunks} audio chunks...")
+            # Generate audio chunks
+            print("Generating audio chunks...")
             chunk_count = 0
-            
-            # Second pass: generate audio using pipeline's built-in chunking
-            for result in pipeline(text, voice=args.voice, speed=args.speed):
+
+            for result in model.generate(
+                text=text,
+                voice=args.voice,
+                speed=args.speed,
+                lang_code=args.lang
+            ):
                 if result.audio is not None:
                     # Save chunk to temporary file
                     chunk_path = os.path.join(temp_dir, f"chunk_{chunk_count:04d}.wav")
-                    sf.write(chunk_path, result.audio.numpy(), 24000)
+                    sf.write(chunk_path, np.array(result.audio), 24000)
                     temp_files.append(chunk_path)
                     chunk_count += 1
-                    progress = (chunk_count / total_chunks) * 100
-                    print(f"Generated chunk {chunk_count}/{total_chunks} ({progress:.1f}%): {len(result.graphemes)} chars")
+                    print(f"Generated chunk {chunk_count}")
             
             if not temp_files:
                 print("Error: No audio was generated.", file=sys.stderr)
