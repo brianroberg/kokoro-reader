@@ -40,8 +40,8 @@ def clean_markdown_text(text: str) -> str:
     # Remove markdown images completely (including alt text)
     text = re.sub(r'!\[([^\]]*)\]\([^\)]+\)', '', text)
     
-    # Remove markdown links but keep the text
-    text = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', text)
+    # Remove markdown links but keep the text (preserve Kokoro phonetic links like [word](/phonemes/))
+    text = re.sub(r'\[([^\]]+)\]\((?!/[^)]*?/\))[^\)]+\)', r'\1', text)
     
     # Remove markdown emphasis (bold/italic)
     text = re.sub(r'\*{1,2}([^*]+)\*{1,2}', r'\1', text)

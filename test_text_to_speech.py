@@ -155,6 +155,27 @@ class TestCleanMarkdownText:
         expected = "Line 1\n\nLine 2 with spaces"
         assert clean_markdown_text(text) == expected
     
+    def test_preserve_phonetic_pronunciation_links(self):
+        """Test that Kokoro phonetic pronunciation links are preserved during markdown cleaning."""
+        text = "Say [Pengelley](/pˈɛndʒɛli/) correctly"
+        result = clean_markdown_text(text)
+        assert "[Pengelley](/pˈɛndʒɛli/)" in result
+
+    def test_preserve_phonetic_links_while_stripping_regular_links(self):
+        """Test that regular links are stripped but phonetic links are kept."""
+        text = "Visit [example](https://example.com) and say [Kokoro](/kˈOkəɹO/) right"
+        result = clean_markdown_text(text)
+        assert "[Kokoro](/kˈOkəɹO/)" in result
+        assert "https://example.com" not in result
+        assert "Visit example" in result
+
+    def test_preserve_multiple_phonetic_links(self):
+        """Test multiple phonetic links in the same text."""
+        text = "Say [Pengelley](/pˈɛndʒɛli/) and [dewed](/djˈuːd/) correctly"
+        result = clean_markdown_text(text)
+        assert "[Pengelley](/pˈɛndʒɛli/)" in result
+        assert "[dewed](/djˈuːd/)" in result
+
     def test_complex_markdown_document(self):
         """Test cleaning a complex markdown document."""
         text = """# My Document
