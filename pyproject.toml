@@ -1,0 +1,22 @@
+[project]
+name = "kokoro-tts"
+version = "0.1.0"
+description = "Text-to-Speech script using MLX Audio and Kokoro model for Apple Silicon Macs"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+dependencies = [
+    "misaki[en]",
+    "mlx-audio",
+    "numpy",
+    "pydub",
+    "soundfile",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["."]

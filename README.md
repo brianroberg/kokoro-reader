@@ -26,15 +26,15 @@ I wrote this script using [Claude Code](https://claude.ai/code).
 
 1. **Clone or download this repository**
 
-2. **Set up a Python virtual environment** (recommended):
+2. **Install [uv](https://docs.astral.sh/uv/getting-started/installation/)** (if you don't have it):
    ```bash
-   python -m venv .venv
-   source .venv/bin/activate
+   curl -LsSf https://astral.sh/uv/install.sh | sh
    ```
 
 3. **Install dependencies**:
    ```bash
-   pip install mlx-audio soundfile pydub
+   uv sync
+   uv pip install en-core-web-sm@https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
    ```
 
 ## Usage
@@ -43,40 +43,40 @@ I wrote this script using [Claude Code](https://claude.ai/code).
 
 ```bash
 # Convert a text file to audio
-python text_to_speech.py document.txt
+uv run python text_to_speech.py document.txt
 
 # Convert a markdown file
-python text_to_speech.py README.md
+uv run python text_to_speech.py README.md
 
 # Read from stdin (pipe or redirect)
-echo "Hello world!" | python text_to_speech.py
-cat document.txt | python text_to_speech.py
+echo "Hello world!" | uv run python text_to_speech.py
+cat document.txt | uv run python text_to_speech.py
 
 # Read markdown from stdin
-cat README.md | python text_to_speech.py --markdown
+cat README.md | uv run python text_to_speech.py --markdown
 ```
 
 ### Advanced Usage
 
 ```bash
 # Use a different voice
-python text_to_speech.py document.txt --voice af_bella
+uv run python text_to_speech.py document.txt --voice af_bella
 
 # Specify output file
-python text_to_speech.py document.txt --output my_audio.wav
+uv run python text_to_speech.py document.txt --output my_audio.wav
 
 # Adjust speech speed
-python text_to_speech.py document.txt --speed 1.2
+uv run python text_to_speech.py document.txt --speed 1.2
 
 # Use different language
-python text_to_speech.py documento.txt --lang e --voice ef_dora  # Spanish
+uv run python text_to_speech.py documento.txt --lang e --voice ef_dora  # Spanish
 
 # Process only part of a document (Unix-style)
-head -n 20 long_document.txt | python text_to_speech.py
-head -c 1000 README.md | python text_to_speech.py --markdown
+head -n 20 long_document.txt | uv run python text_to_speech.py
+head -c 1000 README.md | uv run python text_to_speech.py --markdown
 
 # Extract and convert specific sections
-grep -A 10 "Introduction" document.md | python text_to_speech.py --markdown
+grep -A 10 "Introduction" document.md | uv run python text_to_speech.py --markdown
 ```
 
 ### Command Line Options
@@ -163,31 +163,31 @@ Check out this link for more info.
 
 ### Convert a Simple Text File
 ```bash
-python text_to_speech.py story.txt
+uv run python text_to_speech.py story.txt
 # Output: story.wav
 ```
 
 ### Convert Markdown Documentation
 ```bash
-python text_to_speech.py README.md --voice af_bella --output readme_audio.wav
+uv run python text_to_speech.py README.md --voice af_bella --output readme_audio.wav
 # Output: readme_audio.wav (with cleaned markdown formatting)
 ```
 
 ### Process Text from Stdin
 ```bash
 # Convert piped text
-echo "Welcome to our documentation" | python text_to_speech.py --voice af_sarah
+echo "Welcome to our documentation" | uv run python text_to_speech.py --voice af_sarah
 
 # Process first 500 characters of a long document
-head -c 500 long_document.txt | python text_to_speech.py --output preview.wav
+head -c 500 long_document.txt | uv run python text_to_speech.py --output preview.wav
 
 # Convert specific sections using grep
-grep -A 20 "Installation" README.md | python text_to_speech.py --markdown --output install_guide.wav
+grep -A 20 "Installation" README.md | uv run python text_to_speech.py --markdown --output install_guide.wav
 ```
 
 ### Spanish Text with Spanish Voice
 ```bash
-python text_to_speech.py documento.txt --lang e --voice ef_dora --speed 0.9
+uv run python text_to_speech.py documento.txt --lang e --voice ef_dora --speed 0.9
 # Output: documento.wav (slower Spanish speech)
 ```
 
@@ -205,7 +205,7 @@ python text_to_speech.py documento.txt --lang e --voice ef_dora --speed 0.9
 
 **"Module not found" errors**:
 ```bash
-pip install mlx-audio soundfile pydub
+uv sync
 ```
 
 **"mlx not supported" or platform errors**:
