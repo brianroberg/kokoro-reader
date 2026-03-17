@@ -8,7 +8,7 @@ import re
 import subprocess
 from pathlib import Path
 
-README = Path(__file__).parent / "README.md"
+README = Path(__file__).parent.parent / "README.md"
 
 
 def _extract_cli_options(script_name):
