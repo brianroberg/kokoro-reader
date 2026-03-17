@@ -49,7 +49,20 @@ def test_verify_audio_options_documented(subtests):
             assert option in readme_text, f"{option} not documented in README"
 
 
-def test_verify_audio_command_documented():
-    """The verify_audio.py command itself should appear in the README."""
+def test_convert_audio_options_documented(subtests):
+    """Every convert_audio.py CLI option should appear in the README."""
     readme_text = README.read_text()
-    assert "verify_audio.py" in readme_text, "verify_audio.py not mentioned in README"
+    options = _unique(_extract_cli_options("convert_audio.py"))
+    for option in options:
+        if option == "--help":
+            continue
+        with subtests.test(option=option):
+            assert option in readme_text, f"{option} not documented in README"
+
+
+def test_all_scripts_documented(subtests):
+    """Every CLI script should be mentioned in the README."""
+    readme_text = README.read_text()
+    for script in ["text_to_speech.py", "verify_audio.py", "convert_audio.py"]:
+        with subtests.test(script=script):
+            assert script in readme_text, f"{script} not mentioned in README"

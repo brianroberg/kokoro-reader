@@ -209,6 +209,25 @@ This sends the audio and source text to Gemini, which listens to the recording a
 
 Requires a `GEMINI_API_KEY` environment variable (or a `.env` file in the project directory).
 
+## MP3 Conversion
+
+Convert a WAV recording to MP3 with ID3 metadata tags:
+
+```bash
+uv run python convert_audio.py recording.wav output.mp3 \
+    --title "The Cassandra of the Machine" \
+    --artist "Charles Carman" \
+    --album "The New Atlantis, No. 83 (Winter 2026)"
+```
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `wav_file` | Path to the input WAV file | (required) |
+| `mp3_file` | Path for the output MP3 file | (required) |
+| `--title` | Article title (ID3 TIT2 tag) | |
+| `--artist` | Author name (ID3 TPE1 tag) | |
+| `--album` | Publication name and issue (ID3 TALB tag) | |
+
 ## System Requirements
 
 - **Hardware**: Apple Silicon Mac (M1, M2, M3, or M4)
