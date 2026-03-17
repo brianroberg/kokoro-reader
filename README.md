@@ -192,6 +192,12 @@ The toolkit supports all Kokoro voices. Some popular options:
 | `p` | Brazilian Portuguese |
 | `z` | Mandarin Chinese |
 
+## Claude Code Skill
+
+This project includes a Claude Code skill (`.claude/skills/article-tts-recording.md`) that guides an agent through the full article recording workflow — from fetching content to producing a verified MP3. The skill coordinates this toolkit with the [article-assistant](../article-assistant) project for content retrieval.
+
+Invoke it by asking Claude Code to record an article, or explicitly with `/article-tts-recording`.
+
 ## System Requirements
 
 - **Hardware**: Apple Silicon Mac (M1, M2, M3, or M4)
