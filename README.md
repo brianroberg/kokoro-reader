@@ -1,43 +1,46 @@
-# Kokoro Text-to-Speech Script
+# Kokoro TTS Toolkit
 
-A Python script that converts text files (including Markdown) to high-quality audio using [MLX Audio](https://github.com/Blaizzy/mlx-audio) and the [Kokoro-82M model](https://huggingface.co/mlx-community/Kokoro-82M-bf16). The script automatically handles text chunking for long documents and combines the audio chunks into a single output file.
+A Python toolkit for producing high-quality audio recordings of articles and long-form text using [MLX Audio](https://github.com/Blaizzy/mlx-audio) and the [Kokoro-82M model](https://huggingface.co/mlx-community/Kokoro-82M-bf16). Includes Gemini-based audio verification and MP3 conversion with ID3 tagging.
 
 **Requires Apple Silicon (M1/M2/M3/M4 Mac).**
 
-I wrote this script using [Claude Code](https://claude.ai/code).
-
 ## Features
 
-- 🎯 **Smart Text Processing**: Automatically chunks long texts into manageable pieces
-- 📝 **Markdown Support**: Cleans markdown formatting for better TTS output
-- 🎵 **High-Quality Audio**: Uses Kokoro-82M, an 82-million parameter TTS model
-- 🔧 **Flexible Options**: Multiple voices, languages, and speed controls
-- 🚀 **Native Apple Silicon**: Uses MLX framework for fast inference on M1/M2/M3/M4 Macs
-- 📁 **Multiple Formats**: Supports various text file encodings and formats
-- 🔄 **Stdin Support**: Read from pipes for Unix-style text processing workflows
+- **Text-to-Speech**: Converts text and Markdown files to audio with automatic chunking
+- **Audio Verification**: Sends recordings to Gemini to detect mispronunciations, missing content, and pacing issues
+- **MP3 Conversion**: Converts WAV output to MP3 with ID3 metadata tags (title, artist, album)
+- **Markdown Support**: Strips formatting while preserving Kokoro phonetic pronunciation links (`[word](/phonemes/)`)
+- **Section Breaks**: `[BREAK]` markers insert clean 2-second silent pauses between sections
+- **Em Dash Handling**: Automatically converts `--` to `...` for natural pauses
+- **Multiple Voices**: Supports all Kokoro voices across 9 languages
+- **Stdin Support**: Read from pipes for Unix-style text processing workflows
 
 ## Requirements
 
 - **Apple Silicon Mac** (M1, M2, M3, or M4)
 - **Python 3.10+**
 - **macOS** (MLX framework is Apple Silicon only)
+- **ffmpeg** (for MP3 conversion)
 
 ## Installation
 
-1. **Clone or download this repository**
-
-2. **Install [uv](https://docs.astral.sh/uv/getting-started/installation/)** (if you don't have it):
+1. **Install [uv](https://docs.astral.sh/uv/getting-started/installation/)** (if you don't have it):
    ```bash
    curl -LsSf https://astral.sh/uv/install.sh | sh
    ```
 
-3. **Install dependencies**:
+2. **Install dependencies**:
    ```bash
    uv sync
    uv pip install en-core-web-sm@https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
    ```
 
-## Usage
+3. **Set up Gemini API key** (for audio verification):
+   ```bash
+   echo "GEMINI_API_KEY=your_key_here" > .env
+   ```
+
+## Text-to-Speech
 
 ### Basic Usage
 
@@ -92,114 +95,15 @@ grep -A 10 "Introduction" document.md | uv run python text_to_speech.py --markdo
 | `--keep-temp` | | Keep temporary chunk files | `false` |
 | `--list-voices` | | Show all available voices | |
 
-### Available Voices
-
-The script supports all Kokoro voices. Some popular options:
-
-**American English (lang: `a`)**:
-- `af_heart`, `af_bella`, `af_sarah`, `af_nicole`, `af_sky`
-- `am_adam`, `am_michael`, `am_eric`, `am_liam`
-
-**British English (lang: `b`)**:
-- `bf_emma`, `bf_isabella`, `bf_lily`
-- `bm_george`, `bm_lewis`, `bm_daniel`
-
-**Other Languages**:
-- Spanish (`e`): `ef_dora`, `em_alex`
-- French (`f`): `ff_siwis`
-- Italian (`i`): `if_sara`, `im_nicola`
-- Portuguese (`p`): `pf_dora`, `pm_alex`
-- Chinese (`z`): `zf_xiaoxiao`, `zm_yunxi`
-- Japanese (`j`): `jf_gongitsune`, `jm_kumo`
-
-### Language Codes
-
-| Code | Language |
-|------|----------|
-| `a` | American English |
-| `b` | British English |
-| `e` | Spanish |
-| `f` | French |
-| `h` | Hindi |
-| `i` | Italian |
-| `j` | Japanese |
-| `p` | Brazilian Portuguese |
-| `z` | Mandarin Chinese |
-
-## How It Works
-
-1. **Text Processing**: Reads the input file and cleans markdown formatting if applicable
-2. **Chunking**: Automatically splits long text into smaller chunks suitable for the TTS model
-3. **Audio Generation**: Converts each chunk to audio using MLX Audio with the Kokoro-82M model
-4. **Concatenation**: Combines all audio chunks into a single output file with natural pauses
-
-## Markdown Processing
-
-When processing Markdown files (`.md`, `.markdown`), the script automatically cleans the text for better TTS output by removing:
-
-- **Headers** (`# ## ###`) - formatting removed, text preserved
-- **Images** (`![alt text](url)`) - completely removed including alt text
-- **Links** (`[text](url)`) - URLs removed, link text preserved
-- **Emphasis** (`*italic*`, `**bold**`) - formatting removed, text preserved
-- **Code blocks** and `inline code` - removed entirely
-- **Lists** (`- item`, `1. item`) - bullet/numbering removed, text preserved
-- **Blockquotes** (`> text`) - formatting removed, text preserved
-
-**Example transformation:**
-```markdown
-# My Document
-Here's an image: ![Screenshot](image.png)
-Check out this [link](https://example.com) for more info.
-```
-
-Becomes:
-```
-My Document
-Here's an image: 
-Check out this link for more info.
-```
-
-## Examples
-
-### Convert a Simple Text File
-```bash
-uv run python text_to_speech.py story.txt
-# Output: story.wav
-```
-
-### Convert Markdown Documentation
-```bash
-uv run python text_to_speech.py README.md --voice af_bella --output readme_audio.wav
-# Output: readme_audio.wav (with cleaned markdown formatting)
-```
-
-### Process Text from Stdin
-```bash
-# Convert piped text
-echo "Welcome to our documentation" | uv run python text_to_speech.py --voice af_sarah
-
-# Process first 500 characters of a long document
-head -c 500 long_document.txt | uv run python text_to_speech.py --output preview.wav
-
-# Convert specific sections using grep
-grep -A 20 "Installation" README.md | uv run python text_to_speech.py --markdown --output install_guide.wav
-```
-
-### Spanish Text with Spanish Voice
-```bash
-uv run python text_to_speech.py documento.txt --lang e --voice ef_dora --speed 0.9
-# Output: documento.wav (slower Spanish speech)
-```
-
 ## Audio Verification
 
-After generating a recording, you can verify its quality against the source text using Gemini:
+After generating a recording, verify its quality against the source text using Gemini:
 
 ```bash
 uv run python verify_audio.py recording.wav source_text.md
 ```
 
-This sends the audio and source text to Gemini, which listens to the recording and reports mispronunciations, missing or extra content, and pause issues.
+This sends the audio and source text to Gemini, which listens to the recording and reports mispronunciations, missing or extra content, and pause issues with approximate timestamps.
 
 | Option | Description | Default |
 |--------|-------------|---------|
@@ -207,7 +111,7 @@ This sends the audio and source text to Gemini, which listens to the recording a
 | `text_file` | Path to the source text file | (required) |
 | `--model` | Gemini model to use | `gemini-2.5-flash` |
 
-Requires a `GEMINI_API_KEY` environment variable (or a `.env` file in the project directory).
+Requires a `GEMINI_API_KEY` environment variable (or a `.env` file in the project directory). Costs ~3 cents per verification of a 16-minute article.
 
 ## MP3 Conversion
 
@@ -228,6 +132,66 @@ uv run python convert_audio.py recording.wav output.mp3 \
 | `--artist` | Author name (ID3 TPE1 tag) | |
 | `--album` | Publication name and issue (ID3 TALB tag) | |
 
+## Preparing Text for TTS
+
+### Markdown Cleaning
+
+When processing Markdown files, the script automatically cleans formatting for better TTS output: headers, images, links, emphasis, code blocks, lists, and blockquotes are stripped while preserving the text content.
+
+Phonetic pronunciation links (`[word](/phonemes/)`) are preserved — these use the Kokoro/misaki format to override pronunciation of difficult words.
+
+### Section Breaks
+
+Use `[BREAK]` on its own line to insert a 2-second silent pause between sections:
+
+```
+End of section one.
+
+[BREAK]
+
+Section Two Heading
+
+Start of section two.
+```
+
+### Phonetic Overrides
+
+Override pronunciation of proper nouns or unusual words using `[word](/phonemes/)`:
+
+```
+[Kevorkian](/kɛvˈɔːɹkiən/) was born in [Pontiac](/pˈɑntɪˌæk/), Michigan.
+```
+
+Find phonemes for similar-sounding words with misaki's G2P:
+
+```python
+from misaki import en
+g2p = en.G2P()
+print(g2p('jelly'))   # ʤˈɛli
+```
+
+### Available Voices
+
+The toolkit supports all Kokoro voices. Some popular options:
+
+**American English (lang: `a`)**: `af_heart`, `af_bella`, `af_sarah`, `am_adam`, `am_michael`
+
+**British English (lang: `b`)**: `bf_emma`, `bf_isabella`, `bm_george`, `bm_daniel`
+
+**Other Languages**: Spanish (`e`), French (`f`), Hindi (`h`), Italian (`i`), Japanese (`j`), Portuguese (`p`), Chinese (`z`)
+
+| Code | Language |
+|------|----------|
+| `a` | American English |
+| `b` | British English |
+| `e` | Spanish |
+| `f` | French |
+| `h` | Hindi |
+| `i` | Italian |
+| `j` | Japanese |
+| `p` | Brazilian Portuguese |
+| `z` | Mandarin Chinese |
+
 ## System Requirements
 
 - **Hardware**: Apple Silicon Mac (M1, M2, M3, or M4)
@@ -238,8 +202,6 @@ uv run python convert_audio.py recording.wav output.mp3 \
 
 ## Troubleshooting
 
-### Common Issues
-
 **"Module not found" errors**:
 ```bash
 uv sync
@@ -248,21 +210,12 @@ uv sync
 **"mlx not supported" or platform errors**:
 MLX Audio requires an Apple Silicon Mac. This script does not support Intel Macs, Linux, or Windows.
 
-**Long processing times**:
-- Try using a smaller text file first
-- Consider splitting very large documents manually
-
 ## License
 
-This script is provided under the MIT License. The Kokoro TTS model has its own Apache 2.0 license.
+This project is provided under the MIT License. The Kokoro TTS model has its own Apache 2.0 license.
 
 ## Acknowledgments
 
 - [MLX Audio](https://github.com/Blaizzy/mlx-audio) - MLX-native audio processing library
 - [Kokoro TTS](https://github.com/hexgrad/Kokoro) - The excellent open-source TTS model
-- [StyleTTS 2](https://github.com/yl4579/StyleTTS2) - The underlying architecture
 - [Apple MLX](https://github.com/ml-explore/mlx) - Machine learning framework for Apple Silicon
-
-## Contributing
-
-Feel free to submit issues, feature requests, or pull requests to improve this script!
