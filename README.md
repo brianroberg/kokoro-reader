@@ -1,8 +1,8 @@
 # Kokoro TTS Toolkit
 
-Produce high-quality audio recordings of articles and long-form text on Apple Silicon. Give it a URL or a text file, and it will generate a natural-sounding reading, verify the audio against the source for errors, and output a tagged MP3.
+Produce high-quality audio recordings of articles and long-form text on Apple Silicon. The toolkit provides command-line utilities for text-to-speech generation, audio verification, and MP3 conversion — each usable on its own. It also includes a [Claude Code](https://claude.ai/code) skill that allows Claude to orchestrate all of them together, managing the full pipeline from web article to verified, tagged MP3.
 
-Under the hood, the toolkit uses the [Kokoro-82M](https://huggingface.co/mlx-community/Kokoro-82M-bf16) text-to-speech model running on [MLX](https://github.com/ml-explore/mlx), Google's Gemini for audio verification, and [ffmpeg](https://ffmpeg.org/) for MP3 encoding.
+The TTS engine is [Kokoro-82M](https://huggingface.co/mlx-community/Kokoro-82M-bf16) running on [MLX](https://github.com/ml-explore/mlx). Audio verification uses Google's Gemini to listen to recordings and flag errors. MP3 encoding uses [ffmpeg](https://ffmpeg.org/).
 
 **Requires Apple Silicon (M1/M2/M3/M4 Mac).**
 
@@ -10,13 +10,13 @@ Under the hood, the toolkit uses the [Kokoro-82M](https://huggingface.co/mlx-com
 
 ### With Claude Code (recommended)
 
-The easiest way to use this toolkit is through its [Claude Code](https://claude.ai/code) skill, which manages the full workflow — fetching articles, preparing text, generating audio, verifying quality, and fixing issues iteratively:
+The included skill (`.claude/skills/article-tts-recording.md`) manages the full workflow — fetching articles via the [article-assistant](../article-assistant) project, preparing text, generating audio, verifying quality, and iteratively fixing issues:
 
 ```
 > Record an audio version of this article: https://example.com/article
 ```
 
-The skill (`.claude/skills/article-tts-recording.md`) coordinates this toolkit with the [article-assistant](../article-assistant) project for content retrieval. You can also invoke it explicitly with `/article-tts-recording`.
+You can also invoke it explicitly with `/article-tts-recording`.
 
 ### From the Command Line
 
@@ -52,8 +52,14 @@ uv run python convert_audio.py recording.wav "Article Title.mp3" \
    uv sync
    uv pip install en-core-web-sm@https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
    ```
+   The second line installs a spacy language model needed by the phonemizer. It's distributed from GitHub rather than PyPI, so it can't be included in `pyproject.toml`.
 
-3. **Set up Gemini API key** (for audio verification):
+3. **Install [article-assistant](https://github.com/brianroberg/article-assistant)** in a sibling directory (for fetching articles from URLs):
+   ```bash
+   cd .. && git clone https://github.com/brianroberg/article-assistant.git && cd article-assistant && uv sync
+   ```
+
+4. **Set up Gemini API key** (for audio verification):
    ```bash
    echo "GEMINI_API_KEY=your_key_here" > .env
    ```
