@@ -22,8 +22,6 @@ Thumbs.db
 # Environment and secrets
 .env
 
-# Article source files
-article*.md
 
 # IDE files
 .vscode/
