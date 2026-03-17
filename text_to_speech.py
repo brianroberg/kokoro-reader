@@ -65,6 +65,25 @@ def clean_markdown_text(text: str) -> str:
     return text.strip()
 
 
+def prepare_for_tts(text: str) -> str:
+    """Prepare text for TTS by improving pause markers.
+
+    Replaces -- em dashes with ... ellipsis for longer pauses in the TTS model.
+    """
+    text = re.sub(r'\s*--\s*', '... ', text)
+    return text
+
+
+def split_sections(text: str) -> List[str]:
+    """Split text at [BREAK] markers into separate sections.
+
+    Each section will be generated as a separate audio segment with
+    longer silence between them.
+    """
+    sections = re.split(r'\n*\[BREAK\]\n*', text)
+    return [s.strip() for s in sections if s.strip()]
+
+
 def list_available_voices():
     """List all available voices organized by language."""
     voices = {
@@ -120,18 +139,30 @@ def list_available_voices():
     print("Example: python text_to_speech.py document.txt --voice af_bella --lang a")
 
 
-def concatenate_audio_files(audio_files: List[str], output_path: str) -> None:
-    """Concatenate multiple audio files into one."""
+def concatenate_audio_files(audio_files: List[str], output_path: str, section_breaks: set = None) -> None:
+    """Concatenate multiple audio files into one.
+
+    Args:
+        audio_files: List of WAV file paths to concatenate
+        output_path: Path for the output file
+        section_breaks: Set of chunk indices after which to insert a longer
+                       section pause (2s) instead of the normal inter-chunk pause (300ms)
+    """
     if not audio_files:
         raise ValueError("No audio files to concatenate")
-    
+
+    if section_breaks is None:
+        section_breaks = set()
+
     combined = AudioSegment.empty()
-    
-    for audio_file in audio_files:
+
+    for i, audio_file in enumerate(audio_files):
         audio = AudioSegment.from_wav(audio_file)
         combined += audio
-        # Add small pause between chunks
-        combined += AudioSegment.silent(duration=300)  # 300ms pause
+        if i in section_breaks:
+            combined += AudioSegment.silent(duration=2000)  # 2s section pause
+        else:
+            combined += AudioSegment.silent(duration=300)  # 300ms chunk pause
     
     combined.export(output_path, format="wav")
 
@@ -244,12 +275,17 @@ Examples:
         if is_markdown:
             print("Cleaning markdown formatting...")
             text = clean_markdown_text(text)
-        
+
+        # Prepare text for TTS (em dash → ellipsis, etc.)
+        text = prepare_for_tts(text)
+
         if not text.strip():
             print("Error: Input file is empty or contains no readable text.", file=sys.stderr)
             sys.exit(1)
-        
-        print(f"Text length: {len(text)} characters")
+
+        # Split into sections at [BREAK] markers
+        sections = split_sections(text)
+        print(f"Text length: {sum(len(s) for s in sections)} characters, {len(sections)} section(s)")
 
         # Initialize MLX Audio model (Apple Silicon optimized)
         print("Initializing MLX Audio TTS model...")
@@ -259,35 +295,43 @@ Examples:
         # Create temporary directory for audio chunks
         temp_dir = tempfile.mkdtemp(prefix="kokoro_tts_")
         temp_files = []
+        section_breaks = set()
 
         try:
-            # Generate audio chunks
+            # Generate audio chunks, tracking section boundaries
             print("Generating audio chunks...")
             chunk_count = 0
 
-            for result in model.generate(
-                text=text,
-                voice=args.voice,
-                speed=args.speed,
-                lang_code=args.lang
-            ):
-                if result.audio is not None:
-                    # Save chunk to temporary file
-                    chunk_path = os.path.join(temp_dir, f"chunk_{chunk_count:04d}.wav")
-                    sf.write(chunk_path, np.array(result.audio), 24000)
-                    temp_files.append(chunk_path)
-                    chunk_count += 1
-                    print(f"Generated chunk {chunk_count}")
-            
+            for section_idx, section in enumerate(sections):
+                for result in model.generate(
+                    text=section,
+                    voice=args.voice,
+                    speed=args.speed,
+                    lang_code=args.lang
+                ):
+                    if result.audio is not None:
+                        chunk_path = os.path.join(temp_dir, f"chunk_{chunk_count:04d}.wav")
+                        sf.write(chunk_path, np.array(result.audio), 24000)
+                        temp_files.append(chunk_path)
+                        chunk_count += 1
+                        print(f"Generated chunk {chunk_count}")
+
+                # Mark the last chunk of this section as a section break
+                # (except for the very last section)
+                if section_idx < len(sections) - 1 and temp_files:
+                    section_breaks.add(chunk_count - 1)
+
             if not temp_files:
                 print("Error: No audio was generated.", file=sys.stderr)
                 sys.exit(1)
-            
+
             print(f"Generated {len(temp_files)} audio chunks")
             
             # Concatenate all chunks
             print("Concatenating audio chunks...")
-            concatenate_audio_files(temp_files, output_path)
+            if section_breaks:
+                print(f"Section breaks at chunks: {sorted(section_breaks)}")
+            concatenate_audio_files(temp_files, output_path, section_breaks=section_breaks)
             
             print(f"Audio saved to: {output_path}")
             

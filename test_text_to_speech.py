@@ -18,6 +18,8 @@ import numpy as np
 from text_to_speech import (
     read_text_file,
     clean_markdown_text,
+    prepare_for_tts,
+    split_sections,
     list_available_voices,
     concatenate_audio_files
 )
@@ -220,6 +222,74 @@ Regular text at the end."""
         assert "List item 1" in result
         assert "This is a blockquote" in result
         assert "Regular text at the end." in result
+
+
+class TestPrepareForTTS:
+    """Test the prepare_for_tts function."""
+
+    def test_replaces_em_dashes_with_ellipsis(self):
+        """Test that -- em dashes are replaced with ... for better pauses."""
+        text = "He was a crank -- a prophet."
+        result = prepare_for_tts(text)
+        assert "--" not in result
+        assert "..." in result
+
+    def test_preserves_non_dash_content(self):
+        """Test that text around dashes is preserved."""
+        text = "He was a crank -- a prophet."
+        result = prepare_for_tts(text)
+        assert "He was a crank" in result
+        assert "a prophet." in result
+
+
+class TestSplitSections:
+    """Test the split_sections function."""
+
+    def test_splits_on_break_marker(self):
+        """Test that [BREAK] markers split text into sections."""
+        text = "Section one.\n\n[BREAK]\n\nSection two."
+        sections = split_sections(text)
+        assert len(sections) == 2
+        assert "Section one." in sections[0]
+        assert "Section two." in sections[1]
+
+    def test_no_break_returns_single_section(self):
+        """Test that text without [BREAK] returns as a single section."""
+        text = "Just one section of text."
+        sections = split_sections(text)
+        assert len(sections) == 1
+        assert sections[0] == "Just one section of text."
+
+    def test_multiple_breaks(self):
+        """Test multiple [BREAK] markers."""
+        text = "One.\n\n[BREAK]\n\nTwo.\n\n[BREAK]\n\nThree."
+        sections = split_sections(text)
+        assert len(sections) == 3
+
+    def test_break_marker_not_in_output(self):
+        """Test that [BREAK] markers are removed from section text."""
+        text = "Before.\n\n[BREAK]\n\nAfter."
+        sections = split_sections(text)
+        for section in sections:
+            assert "[BREAK]" not in section
+
+
+class TestConcatenateWithSectionPauses:
+    """Test concatenation with section-level pauses."""
+
+    @patch('text_to_speech.AudioSegment')
+    def test_section_boundaries_get_longer_pause(self, mock_audio_segment):
+        """Test that section boundaries use a longer pause than intra-section chunks."""
+        audio_files = ["chunk1.wav", "chunk2.wav", "chunk3.wav"]
+        section_breaks = {1}  # Break after chunk index 1
+
+        concatenate_audio_files(audio_files, "output.wav", section_breaks=section_breaks)
+
+        silent_calls = mock_audio_segment.silent.call_args_list
+        durations = [call.kwargs.get('duration', call.args[0] if call.args else None)
+                     for call in silent_calls]
+        # Should have at least one call with duration > 300 (the section break)
+        assert any(d is not None and d > 300 for d in durations)
 
 
 class TestListAvailableVoices:
