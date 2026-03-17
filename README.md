@@ -40,6 +40,13 @@ uv run python convert_audio.py recording.wav "Article Title.mp3" \
     --album "The New Atlantis, No. 83 (Winter 2026)"
 ```
 
+Publish to Audiobookshelf:
+
+```bash
+uv run python publish_audio.py podcast "Article Title.mp3" \
+    --podcast "The New Atlantis"
+```
+
 ## Installation
 
 1. **Install [uv](https://docs.astral.sh/uv/getting-started/installation/)**:
@@ -142,6 +149,48 @@ uv run python convert_audio.py recording.wav output.mp3 \
 | `--title` | Article title (ID3 TIT2 tag) | |
 | `--artist` | Author name (ID3 TPE1 tag) | |
 | `--album` | Publication name and issue (ID3 TALB tag) | |
+
+</details>
+
+<details>
+<summary><strong>publish_audio.py</strong> — Publish audio to Audiobookshelf</summary>
+
+Upload a podcast episode:
+
+```bash
+uv run python publish_audio.py podcast "Article Title.mp3" \
+    --podcast "The New Atlantis"
+```
+
+Upload an audiobook:
+
+```bash
+uv run python publish_audio.py book "Chapter 1.mp3" \
+    --title "Book Title" --author "Author Name"
+```
+
+**Podcast subcommand:**
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `audio_file` | Path to the audio file | (required) |
+| `--podcast` | Podcast name in Audiobookshelf | (required) |
+| `--library` | Library name | first podcast library |
+| `--url` | Server URL | `AUDIOBOOKSHELF_URL` env var |
+| `--api-key` | API key | `AUDIOBOOKSHELF_API_KEY` env var |
+
+**Book subcommand:**
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `audio_file` | Path to the audio file | (required) |
+| `--title` | Book title | (required) |
+| `--author` | Author name | (required) |
+| `--library` | Library name | first book library |
+| `--url` | Server URL | `AUDIOBOOKSHELF_URL` env var |
+| `--api-key` | API key | `AUDIOBOOKSHELF_API_KEY` env var |
+
+Requires `AUDIOBOOKSHELF_URL` and `AUDIOBOOKSHELF_API_KEY` environment variables or `.env` file.
 
 </details>
 

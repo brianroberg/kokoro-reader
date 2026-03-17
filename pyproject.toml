@@ -13,12 +13,14 @@ dependencies = [
     "numpy",
     "pydub",
     "python-dotenv>=1.2.2",
+    "requests>=2.32.0",
     "soundfile",
 ]
 
 [dependency-groups]
 dev = [
     "pytest",
+    "pytest-subtests",
 ]
 
 [tool.pytest.ini_options]

@@ -20,7 +20,7 @@ This workflow uses two separate projects that interoperate via text:
 | Tool | Location | Purpose |
 |------|----------|---------|
 | **article-assistant** | `/Users/robergb/tools/article-assistant` | Fetches article content and metadata from URLs |
-| **kokoro TTS toolkit** | `/Users/robergb/tools/kokoro` | Generates audio, verifies quality, converts to MP3 |
+| **kokoro TTS toolkit** | `/Users/robergb/tools/kokoro` | Generates audio, verifies quality, converts to MP3, publishes to Audiobookshelf |
 
 Commands for article-assistant run from its directory. Commands for the TTS toolkit run from the kokoro directory.
 
@@ -36,13 +36,14 @@ digraph tts_workflow {
     assess [label="5. Assess report", shape=diamond];
     fix [label="6. Fix source text\nand regenerate", shape=box];
     convert [label="7. Convert to MP3\nwith ID3 tags", shape=box];
+    publish [label="8. Publish to\nAudiobookshelf", shape=box];
     done [label="Done", shape=doublecircle];
 
     fetch -> prepare -> generate -> verify -> assess;
     assess -> convert [label="clean"];
     assess -> fix [label="issues found"];
     fix -> generate;
-    convert -> done;
+    convert -> publish -> done;
 }
 ```
 
@@ -70,7 +71,7 @@ periodical-edition: No. 83 (Winter 2026)
 ---
 ```
 
-Save the metadata — you'll need title, author, publication, and edition for ID3 tags in Step 7.
+Save the metadata — you'll need title, author, publication, and edition for ID3 tags in Step 7 and publishing in Step 8.
 
 ## Step 2: Prepare Text for TTS
 
@@ -115,15 +116,15 @@ Use judgment when assessing Gemini's report. Not every flagged issue needs fixin
 
 - **Fix:** Garbled words, missing content, extra content, hallucinated sentences
 - **Likely fix:** Mispronounced proper nouns, pacing issues in key passages
-- **Likely ignore:** Minor pronunciation variants of common words (e.g., soft 't' in "Pontiac"), em dash pauses being slightly short (systemic), capitalization emphasis not conveyed (TTS can't do this), normal speech variation that Gemini is being overly granular about
+- **Likely ignore:** Minor pronunciation variants of common words (e.g., soft 't' in "Pontiac"), capitalization emphasis not conveyed (TTS can't do this), normal speech variation that Gemini is being overly granular about
 
-Apply fixes to the source `.md` file according to the issue type:
+Apply fixes to the source `.md` file according to the issue type. **Never change what the article says.** Fixes must preserve the original meaning and content. Acceptable fixes include: adding paragraph breaks, adding pauses, using phonetic overrides, and simplifying punctuation. Unacceptable fixes include: reordering clauses, moving text between sentences, removing content, or rephrasing the author's words.
 
 ### Common TTS Issues Reference
 
 | Issue | Symptom | Fix |
 |-------|---------|-----|
-| **Garbled word** | Rare/foreign proper noun mangled | Phonetic override or word substitution |
+| **Garbled word** | Rare/foreign proper noun mangled | Phonetic override |
 | **Word doubled** | "computers, computers" | Change comma to em-dash before parenthetical |
 | **Content echoed** | Title repeated before its quote | Restructure: replace colon with period before quote |
 | **Content dropped** | Phrase missing from audio | Add paragraph break to shorten the sentence |
@@ -148,7 +149,7 @@ print(g2p('penalty')) # pˈɛnᵊlti
 # So "Pengelley" (pen-JEL-ee) → /pɛnʤˈɛli/
 ```
 
-**When phonetic overrides don't work:** Some words resist overrides. Substitute a common synonym instead: "dewed" → "dew-covered". For proper nouns with no synonym, test the override in isolation before applying throughout.
+Test the override in isolation before applying it throughout the article.
 
 ### General Principles
 
@@ -172,10 +173,33 @@ Map the metadata fields from `article_assistant.py metadata` output:
 - `author` → `--artist` (join multiple authors with "; ")
 - `publication` + `periodical-edition` → `--album` (e.g., "The New Atlantis, No. 83 (Winter 2026)")
 
+## Step 8: Publish to Audiobookshelf
+
+Publish the finished MP3 to Audiobookshelf. Use the `publication` field from the article metadata (Step 1) as the podcast name — this maps to the podcast directory in Audiobookshelf:
+
+```bash
+cd /Users/robergb/tools/kokoro
+uv run python publish_audio.py podcast "Article Title.mp3" \
+    --podcast "The New Atlantis"
+```
+
+The `publication` from `article_assistant.py metadata` maps directly to `--podcast`. The episode title in Audiobookshelf comes from the filename (which was set by `convert_audio.py` in Step 7).
+
+For audiobooks instead of articles:
+
+```bash
+uv run python publish_audio.py book "Chapter 1.mp3" \
+    --title "Book Title" --author "Author Name"
+```
+
+Requires `AUDIOBOOKSHELF_URL` and `AUDIOBOOKSHELF_API_KEY` in `.env`.
+
+Skip this step if the user asked not to publish, or if the Audiobookshelf credentials are not configured.
+
 ## Common Mistakes
 
 - **Using `...` on its own line for section breaks.** This gets vocalized as garbled audio. Use `[BREAK]` instead.
 - **Leaving very long paragraphs intact.** Paragraphs with 6+ sentences and many quoted phrases are the #1 cause of garbled audio.
-- **Using phonetic overrides for every mispronunciation.** Word substitution is more reliable when a common synonym exists.
+- **Overusing phonetic overrides.** Only use them for proper nouns and unusual words that the TTS consistently mispronounces. Minor pronunciation variants of common words are not worth overriding.
 - **Not spelling out Roman numerals or abbreviations.** The TTS model reads characters literally.
-- **Trying to fix every issue Gemini flags.** Use judgment — minor pronunciation variants and systemic em-dash pacing are not worth iterating on.
+- **Trying to fix every issue Gemini flags.** Use judgment — minor pronunciation variants are not worth iterating on.
