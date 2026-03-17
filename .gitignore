@@ -19,6 +19,12 @@ temp_*
 .DS_Store
 Thumbs.db
 
+# Environment and secrets
+.env
+
+# Article source files
+article*.md
+
 # IDE files
 .vscode/
 .idea/
