@@ -20,6 +20,7 @@ from text_to_speech import (
     clean_markdown_text,
     prepare_for_tts,
     split_sections,
+    generate_audio,
     list_available_voices,
     concatenate_audio_files
 )
@@ -290,6 +291,68 @@ class TestConcatenateWithSectionPauses:
                      for call in silent_calls]
         # Should have at least one call with duration > 300 (the section break)
         assert any(d is not None and d > 300 for d in durations)
+
+
+class TestGenerateAudio:
+    """Test the generate_audio function."""
+
+    @patch('text_to_speech.concatenate_audio_files')
+    @patch('text_to_speech.sf')
+    @patch('text_to_speech.load_model')
+    def test_generates_wav_output(self, mock_load_model, mock_sf, mock_concat, tmp_path):
+        """Test that generate_audio produces a WAV file."""
+        mock_model = MagicMock()
+        mock_load_model.return_value = mock_model
+        mock_result = MagicMock()
+        mock_result.audio = [0.0, 0.1, 0.2]
+        mock_model.generate.return_value = [mock_result]
+
+        output_path = str(tmp_path / "output.wav")
+        generate_audio("Hello world.", output_path)
+
+        mock_load_model.assert_called_once()
+        mock_model.generate.assert_called_once()
+        mock_concat.assert_called_once()
+
+    @patch('text_to_speech.concatenate_audio_files')
+    @patch('text_to_speech.sf')
+    @patch('text_to_speech.load_model')
+    def test_passes_voice_and_speed(self, mock_load_model, mock_sf, mock_concat, tmp_path):
+        """Test that voice and speed parameters are forwarded to the model."""
+        mock_model = MagicMock()
+        mock_load_model.return_value = mock_model
+        mock_result = MagicMock()
+        mock_result.audio = [0.0]
+        mock_model.generate.return_value = [mock_result]
+
+        output_path = str(tmp_path / "output.wav")
+        generate_audio("Hello.", output_path, voice="af_bella", speed=1.2, lang="b")
+
+        call_kwargs = mock_model.generate.call_args.kwargs
+        assert call_kwargs["voice"] == "af_bella"
+        assert call_kwargs["speed"] == 1.2
+        assert call_kwargs["lang_code"] == "b"
+
+    @patch('text_to_speech.concatenate_audio_files')
+    @patch('text_to_speech.sf')
+    @patch('text_to_speech.load_model')
+    def test_handles_section_breaks(self, mock_load_model, mock_sf, mock_concat, tmp_path):
+        """Test that [BREAK] markers result in section breaks during concatenation."""
+        mock_model = MagicMock()
+        mock_load_model.return_value = mock_model
+        mock_result = MagicMock()
+        mock_result.audio = [0.0]
+        mock_model.generate.return_value = [mock_result]
+
+        output_path = str(tmp_path / "output.wav")
+        generate_audio("Section one.\n\n[BREAK]\n\nSection two.", output_path)
+
+        # Model should be called twice (once per section)
+        assert mock_model.generate.call_count == 2
+        # Concatenation should receive section_breaks
+        concat_kwargs = mock_concat.call_args.kwargs
+        assert "section_breaks" in concat_kwargs
+        assert len(concat_kwargs["section_breaks"]) == 1
 
 
 class TestListAvailableVoices:
