@@ -9,7 +9,7 @@ from unittest.mock import patch, MagicMock
 import tempfile
 import os
 
-from verify_audio import verify_audio
+from verify_audio import verify_audio, main
 
 
 class TestVerifyAudio:
@@ -101,3 +101,76 @@ class TestVerifyAudio:
         """Test that a missing audio file raises FileNotFoundError."""
         with pytest.raises(FileNotFoundError):
             verify_audio("/nonexistent/audio.wav", "Some text.")
+
+
+class TestCLI:
+    """Test the command-line interface."""
+
+    @patch("verify_audio.verify_audio")
+    def test_cli_with_text_file(self, mock_verify, capsys):
+        """Test CLI reads source text from a file."""
+        mock_verify.return_value = "No issues found."
+
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as af:
+            af.write(b"fake audio")
+            audio_path = af.name
+
+        with tempfile.NamedTemporaryFile(suffix=".txt", mode="w", delete=False) as tf:
+            tf.write("Hello world.")
+            text_path = tf.name
+
+        try:
+            main([audio_path, text_path])
+            mock_verify.assert_called_once()
+            args = mock_verify.call_args
+            assert args[0][1] == "Hello world."
+            captured = capsys.readouterr()
+            assert "No issues found." in captured.out
+        finally:
+            os.unlink(audio_path)
+            os.unlink(text_path)
+
+    @patch("verify_audio.verify_audio")
+    def test_cli_with_model_flag(self, mock_verify, capsys):
+        """Test CLI passes --model flag to verify_audio."""
+        mock_verify.return_value = "All good."
+
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as af:
+            af.write(b"fake audio")
+            audio_path = af.name
+
+        with tempfile.NamedTemporaryFile(suffix=".txt", mode="w", delete=False) as tf:
+            tf.write("Some text.")
+            text_path = tf.name
+
+        try:
+            main([audio_path, text_path, "--model", "gemini-2.5-pro"])
+            call_args = mock_verify.call_args
+            assert call_args.kwargs.get("model") == "gemini-2.5-pro" or call_args[0][2] == "gemini-2.5-pro"
+        finally:
+            os.unlink(audio_path)
+            os.unlink(text_path)
+
+    def test_cli_missing_audio_file_exits(self, capsys):
+        """Test CLI exits with error for missing audio file."""
+        with tempfile.NamedTemporaryFile(suffix=".txt", mode="w", delete=False) as tf:
+            tf.write("Some text.")
+            text_path = tf.name
+
+        try:
+            with pytest.raises(SystemExit):
+                main(["/nonexistent/audio.wav", text_path])
+        finally:
+            os.unlink(text_path)
+
+    def test_cli_missing_text_file_exits(self):
+        """Test CLI exits with error for missing text file."""
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as af:
+            af.write(b"fake audio")
+            audio_path = af.name
+
+        try:
+            with pytest.raises(SystemExit):
+                main([audio_path, "/nonexistent/text.txt"])
+        finally:
+            os.unlink(audio_path)

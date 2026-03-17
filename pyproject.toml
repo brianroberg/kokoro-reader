@@ -9,6 +9,7 @@ dependencies = [
     "google-genai>=1.67.0",
     "misaki[en]",
     "mlx-audio",
+    "mutagen>=1.47.0",
     "numpy",
     "pydub",
     "python-dotenv>=1.2.2",

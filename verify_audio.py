@@ -5,7 +5,9 @@ Compares a TTS audio recording against source text to identify
 mispronunciations, missing content, and other issues.
 """
 
+import argparse
 import os
+import sys
 from pathlib import Path
 from google import genai
 from dotenv import load_dotenv
@@ -57,3 +59,34 @@ def verify_audio(audio_path: str, source_text: str, model: str = "gemini-2.5-fla
     )
 
     return response.text
+
+
+def main(argv=None):
+    """CLI entry point for audio verification."""
+    parser = argparse.ArgumentParser(
+        description="Verify a TTS audio recording against source text using Gemini"
+    )
+    parser.add_argument("audio_file", help="Path to the audio file (.wav)")
+    parser.add_argument("text_file", help="Path to the source text file")
+    parser.add_argument(
+        "--model", default="gemini-2.5-flash",
+        help="Gemini model to use (default: gemini-2.5-flash)"
+    )
+
+    args = parser.parse_args(argv)
+
+    if not os.path.exists(args.audio_file):
+        print(f"Error: Audio file '{args.audio_file}' not found.", file=sys.stderr)
+        sys.exit(1)
+
+    if not os.path.exists(args.text_file):
+        print(f"Error: Text file '{args.text_file}' not found.", file=sys.stderr)
+        sys.exit(1)
+
+    source_text = Path(args.text_file).read_text()
+    result = verify_audio(args.audio_file, source_text, model=args.model)
+    print(result)
+
+
+if __name__ == "__main__":
+    main()

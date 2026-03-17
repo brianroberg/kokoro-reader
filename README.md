@@ -191,6 +191,24 @@ uv run python text_to_speech.py documento.txt --lang e --voice ef_dora --speed 0
 # Output: documento.wav (slower Spanish speech)
 ```
 
+## Audio Verification
+
+After generating a recording, you can verify its quality against the source text using Gemini:
+
+```bash
+uv run python verify_audio.py recording.wav source_text.md
+```
+
+This sends the audio and source text to Gemini, which listens to the recording and reports mispronunciations, missing or extra content, and pause issues.
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `audio_file` | Path to the audio file (.wav) | (required) |
+| `text_file` | Path to the source text file | (required) |
+| `--model` | Gemini model to use | `gemini-2.5-flash` |
+
+Requires a `GEMINI_API_KEY` environment variable (or a `.env` file in the project directory).
+
 ## System Requirements
 
 - **Hardware**: Apple Silicon Mac (M1, M2, M3, or M4)
