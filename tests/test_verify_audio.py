@@ -52,7 +52,56 @@ def mock_gemini_client(mock_genai, response_text="No issues found."):
     mock_response = MagicMock()
     mock_response.text = response_text
     mock_client.models.generate_content.return_value = mock_response
+    uploaded = MagicMock()
+    uploaded.state.name = "ACTIVE"
+    mock_client.files.upload.return_value = uploaded
     return mock_client
+
+
+class TestUploadReadiness:
+    """Test that generation waits for the Files API to finish processing.
+
+    files.upload() can return while the file is still PROCESSING; querying
+    the model against such a file makes it behave as if no audio were
+    attached (observed on a 28-minute upload during issue #4 calibration).
+    """
+
+    @patch("verify_audio.time.sleep")
+    @patch("verify_audio.genai")
+    def test_waits_for_processing_upload_to_become_active(
+        self, mock_genai, mock_sleep, tmp_path
+    ):
+        """Test a PROCESSING upload is polled until ACTIVE before generating."""
+        mock_client = mock_gemini_client(mock_genai)
+        uploaded = MagicMock()
+        uploaded.state.name = "PROCESSING"
+        uploaded.name = "files/abc123"
+        mock_client.files.upload.return_value = uploaded
+        ready = MagicMock()
+        ready.state.name = "ACTIVE"
+        still_processing = MagicMock()
+        still_processing.state.name = "PROCESSING"
+        mock_client.files.get.side_effect = [still_processing, ready]
+        audio_path = make_wav(tmp_path / "audio.wav")
+
+        verify_audio(audio_path, "Some text.")
+
+        assert mock_client.files.get.call_count == 2
+        mock_client.models.generate_content.assert_called_once()
+
+    @patch("verify_audio.time.sleep")
+    @patch("verify_audio.genai")
+    def test_failed_upload_raises(self, mock_genai, mock_sleep, tmp_path):
+        """Test a FAILED upload raises instead of querying the model."""
+        mock_client = mock_gemini_client(mock_genai)
+        failed = MagicMock()
+        failed.state.name = "FAILED"
+        mock_client.files.upload.return_value = failed
+        audio_path = make_wav(tmp_path / "audio.wav")
+
+        with pytest.raises(RuntimeError, match="FAILED"):
+            verify_audio(audio_path, "Some text.")
+        mock_client.models.generate_content.assert_not_called()
 
 
 class TestVerifyAudio:

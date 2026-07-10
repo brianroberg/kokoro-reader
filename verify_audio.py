@@ -10,6 +10,7 @@ import os
 import re
 import sys
 import tempfile
+import time
 from pathlib import Path
 from google import genai
 from dotenv import load_dotenv
@@ -178,10 +179,26 @@ def verify_audio(audio_path: str, source_text: str, model: str = DEFAULT_MODEL) 
     return f"{precheck}\n\n{report}"
 
 
+def _wait_until_active(client, audio_file, poll_seconds: int = 2):
+    """Block until an uploaded file finishes processing.
+
+    files.upload() can return while the file is still PROCESSING; querying
+    the model against it then behaves as if no audio were attached.
+    """
+    while audio_file.state.name == "PROCESSING":
+        time.sleep(poll_seconds)
+        audio_file = client.files.get(name=audio_file.name)
+    if audio_file.state.name != "ACTIVE":
+        raise RuntimeError(
+            f"Uploaded audio file ended in state {audio_file.state.name}"
+        )
+    return audio_file
+
+
 def _verify_single(client, audio_path: str, source_text: str, model: str,
                    context_note: str = "") -> str:
     """Verify one audio file against its text in a single model call."""
-    audio_file = client.files.upload(file=audio_path)
+    audio_file = _wait_until_active(client, client.files.upload(file=audio_path))
 
     prompt = VERIFICATION_PROMPT.format(source_text=source_text)
     if context_note:
