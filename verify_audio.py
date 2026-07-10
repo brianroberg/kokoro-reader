@@ -14,6 +14,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+DEFAULT_MODEL = "gemini-flash-latest"
+
 VERIFICATION_PROMPT = """Here is the source text of an article, and an audio recording of it being read aloud. Compare them carefully. Report:
 
 - Words that are mispronounced or garbled
@@ -30,7 +32,7 @@ SOURCE TEXT:
 {source_text}"""
 
 
-def verify_audio(audio_path: str, source_text: str, model: str = "gemini-2.5-flash") -> str:
+def verify_audio(audio_path: str, source_text: str, model: str = DEFAULT_MODEL) -> str:
     """Verify a TTS audio recording against its source text using Gemini.
 
     Args:
@@ -69,8 +71,8 @@ def main(argv=None):
     parser.add_argument("audio_file", help="Path to the audio file (.wav)")
     parser.add_argument("text_file", help="Path to the source text file")
     parser.add_argument(
-        "--model", default="gemini-2.5-flash",
-        help="Gemini model to use (default: gemini-2.5-flash)"
+        "--model", default=DEFAULT_MODEL,
+        help=f"Gemini model to use (default: {DEFAULT_MODEL})"
     )
 
     args = parser.parse_args(argv)

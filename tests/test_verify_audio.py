@@ -93,6 +93,16 @@ class TestVerifyAudio:
         call_args = mock_client.models.generate_content.call_args
         assert call_args.kwargs.get("model") == "gemini-2.5-pro" or "gemini-2.5-pro" in str(call_args)
 
+    @patch("verify_audio.genai")
+    def test_default_model_is_maintained_alias(self, mock_genai, tmp_path):
+        """Test that the default model is the maintained gemini-flash-latest alias."""
+        mock_client = mock_gemini_client(mock_genai)
+        audio_path = make_wav(tmp_path / "audio.wav")
+
+        verify_audio(audio_path, "Some text.")
+        call_args = mock_client.models.generate_content.call_args
+        assert call_args.kwargs.get("model") == "gemini-flash-latest"
+
     def test_raises_on_missing_audio_file(self):
         """Test that a missing audio file raises FileNotFoundError."""
         with pytest.raises(FileNotFoundError):
@@ -128,6 +138,18 @@ class TestCLI:
         main([audio_path, str(text_path), "--model", "gemini-2.5-pro"])
         call_args = mock_verify.call_args
         assert call_args.kwargs.get("model") == "gemini-2.5-pro" or call_args[0][2] == "gemini-2.5-pro"
+
+    @patch("verify_audio.verify_audio")
+    def test_cli_default_model_is_maintained_alias(self, mock_verify, tmp_path):
+        """Test CLI defaults to the maintained gemini-flash-latest alias."""
+        mock_verify.return_value = "All good."
+        audio_path = make_wav(tmp_path / "audio.wav")
+        text_path = tmp_path / "source.txt"
+        text_path.write_text("Some text.")
+
+        main([audio_path, str(text_path)])
+        call_args = mock_verify.call_args
+        assert call_args.kwargs.get("model") == "gemini-flash-latest"
 
     def test_cli_missing_audio_file_exits(self, tmp_path):
         """Test CLI exits with error for missing audio file."""
