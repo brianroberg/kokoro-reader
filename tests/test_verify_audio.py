@@ -128,6 +128,51 @@ class TestVerifyAudio:
             verify_audio("/nonexistent/audio.wav", "Some text.")
 
 
+class TestChunkedVerification:
+    """Test that [BREAK]-sectioned recordings are verified chunk by chunk."""
+
+    TWO_SECTION_TEXT = "Alpha section text.\n\n[BREAK]\n\nBeta section text."
+    TWO_SECTION_SPEC = [("tone", 1000), ("silence", 2000), ("tone", 1000)]
+
+    @patch("verify_audio.genai")
+    def test_verifies_each_section_against_its_text_slice(self, mock_genai, tmp_path):
+        """Test each audio chunk is sent with only its own section's text."""
+        mock_client = mock_gemini_client(mock_genai)
+        audio_path = make_wav(tmp_path / "audio.wav", self.TWO_SECTION_SPEC)
+
+        verify_audio(audio_path, self.TWO_SECTION_TEXT)
+
+        assert mock_client.files.upload.call_count == 2
+        assert mock_client.models.generate_content.call_count == 2
+        first_prompt = str(mock_client.models.generate_content.call_args_list[0])
+        second_prompt = str(mock_client.models.generate_content.call_args_list[1])
+        assert "Alpha" in first_prompt and "Beta" not in first_prompt
+        assert "Beta" in second_prompt and "Alpha" not in second_prompt
+
+    @patch("verify_audio.genai")
+    def test_chunk_prompts_include_section_context(self, mock_genai, tmp_path):
+        """Test each chunk's prompt says which section of how many it is."""
+        mock_client = mock_gemini_client(mock_genai)
+        audio_path = make_wav(tmp_path / "audio.wav", self.TWO_SECTION_SPEC)
+
+        verify_audio(audio_path, self.TWO_SECTION_TEXT)
+
+        first_prompt = str(mock_client.models.generate_content.call_args_list[0])
+        assert "section 1 of 2" in first_prompt
+
+    @patch("verify_audio.genai")
+    def test_report_has_section_headers_with_absolute_ranges(self, mock_genai, tmp_path):
+        """Test the aggregated report labels each section with its time range."""
+        mock_gemini_client(mock_genai, "No issues found.")
+        audio_path = make_wav(tmp_path / "audio.wav", self.TWO_SECTION_SPEC)
+
+        result = verify_audio(audio_path, self.TWO_SECTION_TEXT)
+
+        assert "## Section 1 of 2 (0:00–0:02)" in result
+        assert "## Section 2 of 2 (0:02–0:04)" in result
+        assert "relative to" in result  # note explaining in-section timestamps
+
+
 class TestFormatTimestamp:
     """Test millisecond-to-MM:SS formatting."""
 

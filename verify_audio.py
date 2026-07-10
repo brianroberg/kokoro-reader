@@ -9,11 +9,14 @@ import argparse
 import os
 import re
 import sys
+import tempfile
 from pathlib import Path
 from google import genai
 from dotenv import load_dotenv
 from pydub import AudioSegment
 from pydub.silence import detect_silence
+
+from text_to_speech import split_sections
 
 load_dotenv()
 
@@ -131,16 +134,67 @@ def verify_audio(audio_path: str, source_text: str, model: str = DEFAULT_MODEL) 
 
     client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
+    sections = split_sections(source_text)
+    gaps = find_section_gaps(audio)
+
+    if len(sections) > 1 and len(gaps) + 1 == len(sections):
+        report = _verify_chunked(client, audio, sections, gaps, model)
+    else:
+        report = _verify_single(client, audio_path, source_text, model)
+
+    return f"{precheck}\n\n{report}"
+
+
+def _verify_single(client, audio_path: str, source_text: str, model: str,
+                   context_note: str = "") -> str:
+    """Verify one audio file against its text in a single model call."""
     audio_file = client.files.upload(file=audio_path)
 
     prompt = VERIFICATION_PROMPT.format(source_text=source_text)
+    if context_note:
+        prompt = f"{context_note}\n\n{prompt}"
 
     response = client.models.generate_content(
         model=model,
         contents=[prompt, audio_file],
     )
 
-    return f"{precheck}\n\n{response.text}"
+    return response.text
+
+
+def _verify_chunked(client, audio: AudioSegment, sections: list,
+                    gaps: list, model: str) -> str:
+    """Verify each [BREAK] section separately and aggregate the results."""
+    chunks = split_audio_at_gaps(audio, gaps)
+    total = len(chunks)
+    parts = [
+        "Note: timestamps within each section below are relative to that "
+        "section's start; the header gives its absolute range."
+    ]
+
+    with tempfile.TemporaryDirectory(prefix="verify_audio_") as temp_dir:
+        for i, ((start_ms, segment), section_text) in enumerate(
+            zip(chunks, sections), start=1
+        ):
+            chunk_path = os.path.join(temp_dir, f"section_{i}.wav")
+            segment.export(chunk_path, format="wav")
+
+            context_note = (
+                f"This audio is section {i} of {total} of a longer recording; "
+                "it may begin and end mid-article."
+            )
+            result = _verify_single(
+                client, chunk_path, section_text, model, context_note
+            )
+
+            end_ms = start_ms + len(segment)
+            header = (
+                f"## Section {i} of {total} "
+                f"({format_timestamp(start_ms)}–{format_timestamp(end_ms)})"
+            )
+            parts.append(f"{header}\n{result}")
+
+    return "\n\n".join(parts)
 
 
 def main(argv=None):
