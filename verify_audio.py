@@ -13,6 +13,7 @@ from pathlib import Path
 from google import genai
 from dotenv import load_dotenv
 from pydub import AudioSegment
+from pydub.silence import detect_silence
 
 load_dotenv()
 
@@ -59,6 +60,13 @@ def precheck_report(audio: AudioSegment, source_text: str) -> str:
         lines.append(
             f"WARNING: pace of {wpm:.0f} WPM is outside the normal speech "
             "range (100-250) — audio may be truncated or have extra content."
+        )
+    for start_ms, end_ms in detect_silence(
+        audio, min_silence_len=5000, silence_thresh=-40
+    ):
+        lines.append(
+            f"WARNING: {format_timestamp(end_ms - start_ms)} of silence at "
+            f"{format_timestamp(start_ms)} — far longer than a [BREAK] pause."
         )
     return "\n".join(lines)
 

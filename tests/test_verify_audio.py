@@ -163,6 +163,25 @@ class TestPrecheckReport:
 
         assert "WARNING" not in report
 
+    def test_warns_on_unexpectedly_long_silence(self):
+        """Test a silence gap far longer than a [BREAK] pause warns with a timestamp."""
+        audio = make_segment([("tone", 30000), ("silence", 6000), ("tone", 30000)])
+        text = " ".join(["word"] * 150)  # pace in band; only silence should warn
+
+        report = precheck_report(audio, text)
+
+        assert "WARNING" in report
+        assert "0:30" in report  # the silence starts 30s in
+
+    def test_no_warning_for_normal_break_silence(self):
+        """Test an ordinary ~2s [BREAK] gap does not trigger the silence warning."""
+        audio = make_segment([("tone", 30000), ("silence", 2000), ("tone", 30000)])
+        text = " ".join(["word"] * 150)
+
+        report = precheck_report(audio, text)
+
+        assert "WARNING" not in report
+
 
 class TestCLI:
     """Test the command-line interface."""
