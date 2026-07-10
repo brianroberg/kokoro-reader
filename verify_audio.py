@@ -71,6 +71,28 @@ def precheck_report(audio: AudioSegment, source_text: str) -> str:
     return "\n".join(lines)
 
 
+def find_section_gaps(
+    audio: AudioSegment,
+    min_silence_len: int = 1500,
+    silence_thresh: int = -40,
+) -> list:
+    """Find the silence gaps inserted at [BREAK] section boundaries.
+
+    text_to_speech.py inserts 2000ms of silence at each [BREAK] and only
+    300ms between ordinary chunks, so a 1500ms minimum cleanly separates
+    the two. Returns a list of (start_ms, end_ms) tuples.
+    """
+    return [
+        (start_ms, end_ms)
+        for start_ms, end_ms in detect_silence(
+            audio,
+            min_silence_len=min_silence_len,
+            silence_thresh=silence_thresh,
+            seek_step=50,
+        )
+    ]
+
+
 def verify_audio(audio_path: str, source_text: str, model: str = DEFAULT_MODEL) -> str:
     """Verify a TTS audio recording against its source text using Gemini.
 

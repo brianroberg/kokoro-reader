@@ -10,7 +10,13 @@ from unittest.mock import patch, MagicMock
 from pydub import AudioSegment
 from pydub.generators import Sine
 
-from verify_audio import verify_audio, main, precheck_report, format_timestamp
+from verify_audio import (
+    verify_audio,
+    main,
+    precheck_report,
+    format_timestamp,
+    find_section_gaps,
+)
 
 
 def make_segment(spec):
@@ -193,6 +199,27 @@ class TestPrecheckReport:
         report = precheck_report(audio, text)
 
         assert "WARNING" not in report
+
+
+class TestFindSectionGaps:
+    """Test detection of the ~2s silences inserted at [BREAK] boundaries."""
+
+    def test_finds_break_gap(self):
+        """Test a 2s silence between tones is reported as one gap."""
+        audio = make_segment([("tone", 1000), ("silence", 2000), ("tone", 1000)])
+
+        gaps = find_section_gaps(audio)
+
+        assert len(gaps) == 1
+        start_ms, end_ms = gaps[0]
+        assert start_ms == pytest.approx(1000, abs=200)
+        assert end_ms == pytest.approx(3000, abs=200)
+
+    def test_ignores_short_intra_section_pauses(self):
+        """Test the 300ms pauses between ordinary TTS chunks are not gaps."""
+        audio = make_segment([("tone", 1000), ("silence", 300), ("tone", 1000)])
+
+        assert find_section_gaps(audio) == []
 
 
 class TestCLI:
