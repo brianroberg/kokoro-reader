@@ -189,14 +189,24 @@ def verify_audio(audio_path: str, source_text: str, model: str = DEFAULT_MODEL) 
     return f"{precheck}\n\n{report}"
 
 
-def _wait_until_active(client, audio_file, poll_seconds: int = 2):
+def _wait_until_active(client, audio_file, poll_seconds: int = 2,
+                       timeout_seconds: int = 300):
     """Block until an uploaded file finishes processing.
 
     files.upload() can return while the file is still PROCESSING; querying
-    the model against it then behaves as if no audio were attached.
+    the model against it then behaves as if no audio were attached. Gives
+    up after timeout_seconds so a file wedged in PROCESSING can't hang the
+    tool indefinitely.
     """
+    waited = 0
     while audio_file.state.name == "PROCESSING":
+        if waited >= timeout_seconds:
+            raise RuntimeError(
+                f"Uploaded audio file still PROCESSING after "
+                f"{timeout_seconds}s — giving up."
+            )
         time.sleep(poll_seconds)
+        waited += poll_seconds
         audio_file = client.files.get(name=audio_file.name)
     if audio_file.state.name != "ACTIVE":
         raise RuntimeError(
@@ -214,10 +224,18 @@ def _verify_single(client, audio_path: str, source_text: str, model: str,
     if context_note:
         prompt = f"{context_note}\n\n{prompt}"
 
-    response = client.models.generate_content(
-        model=model,
-        contents=[prompt, audio_file],
-    )
+    try:
+        response = client.models.generate_content(
+            model=model,
+            contents=[prompt, audio_file],
+        )
+    finally:
+        # Best-effort cleanup so chunked runs don't pile uploads up against
+        # the Files API quota (uploads otherwise linger ~48h).
+        try:
+            client.files.delete(name=audio_file.name)
+        except Exception:
+            pass
 
     return response.text
 
