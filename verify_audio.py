@@ -144,16 +144,23 @@ def check_single_call_limit(duration_ms: int, description: str) -> None:
 def verify_audio(audio_path: str, source_text: str, model: str = DEFAULT_MODEL) -> str:
     """Verify a TTS audio recording against its source text using Gemini.
 
+    Runs a deterministic pre-check, then — when the audio's [BREAK]
+    silence gaps pair up with the text's [BREAK] sections — verifies each
+    section separately and aggregates the results. Otherwise verifies the
+    whole file in one call, provided it's short enough to be reliable.
+
     Args:
         audio_path: Path to the audio file (.wav)
         source_text: The original text that was read aloud
         model: Gemini model to use for verification
 
     Returns:
-        The model's assessment as a string
+        The pre-check stats followed by the model's assessment
 
     Raises:
         FileNotFoundError: If the audio file doesn't exist
+        ValueError: If a single call would need more audio than
+            MAX_SINGLE_CALL_MINUTES allows
     """
     if not os.path.exists(audio_path):
         raise FileNotFoundError(f"Audio file not found: {audio_path}")
