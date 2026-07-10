@@ -7,12 +7,30 @@ mispronunciations, missing content, and other issues.
 
 import argparse
 import os
+import re
 import sys
+import tempfile
+import time
 from pathlib import Path
 from google import genai
 from dotenv import load_dotenv
+from pydub import AudioSegment
+from pydub.silence import detect_silence
+
+from text_to_speech import split_sections
 
 load_dotenv()
+
+DEFAULT_MODEL = "gemini-flash-latest"
+
+# Longest stretch of audio one generate_content call can be trusted with.
+# Calibrated empirically on known audio (issue #4): at 11.4 minutes,
+# repeated runs were consistent and caught a real mispronunciation every
+# time; at 17.5 minutes, 1 in 4 runs reported phantom missing content
+# and all 4 missed that same real issue; at 28 minutes phantoms were
+# reproducible. 15 sits above every real [BREAK] section (max 13.5 min)
+# and below the shortest length where comparison degraded.
+MAX_SINGLE_CALL_MINUTES = 15
 
 VERIFICATION_PROMPT = """Here is the source text of an article, and an audio recording of it being read aloud. Compare them carefully. Report:
 
@@ -30,8 +48,106 @@ SOURCE TEXT:
 {source_text}"""
 
 
-def verify_audio(audio_path: str, source_text: str, model: str = "gemini-2.5-flash") -> str:
+def format_timestamp(ms: int) -> str:
+    """Format a millisecond offset as M:SS (e.g. 754000 -> "12:34")."""
+    total_seconds = int(ms // 1000)
+    return f"{total_seconds // 60}:{total_seconds % 60:02d}"
+
+
+def precheck_report(audio: AudioSegment, source_text: str) -> str:
+    """Deterministic sanity checks that run before any model call.
+
+    Reports audio duration, source word count, and effective words per
+    minute. Costs nothing — no API call involved.
+    """
+    duration_ms = len(audio)
+    word_count = len(re.sub(r"\[BREAK\]", " ", source_text).split())
+    wpm = word_count / (duration_ms / 60000) if duration_ms else 0
+
+    lines = [
+        "## Pre-check (deterministic)",
+        f"Duration: {format_timestamp(duration_ms)} | "
+        f"{word_count} words | {wpm:.0f} WPM",
+    ]
+    if not 100 <= wpm <= 250:
+        lines.append(
+            f"WARNING: pace of {wpm:.0f} WPM is outside the normal speech "
+            "range (100-250) — audio may be truncated or have extra content."
+        )
+    for start_ms, end_ms in detect_silence(
+        audio, min_silence_len=5000, silence_thresh=-40, seek_step=100
+    ):
+        lines.append(
+            f"WARNING: {format_timestamp(end_ms - start_ms)} of silence at "
+            f"{format_timestamp(start_ms)} — far longer than a [BREAK] pause."
+        )
+    return "\n".join(lines)
+
+
+def find_section_gaps(
+    audio: AudioSegment,
+    min_silence_len: int = 2500,
+    silence_thresh: int = -40,
+) -> list:
+    """Find the silence gaps inserted at [BREAK] section boundaries.
+
+    text_to_speech.py inserts 2000ms of silence at each [BREAK] and only
+    300ms between ordinary chunks — but Kokoro's own trailing quiet at
+    paragraph ends stretches both: in real recordings ordinary joins
+    measure ~1.5-2.0s of silence and [BREAK] joins ~3.2-3.4s. A 2500ms
+    minimum separates the two populations. Returns a list of
+    (start_ms, end_ms) tuples.
+    """
+    return [
+        (start_ms, end_ms)
+        for start_ms, end_ms in detect_silence(
+            audio,
+            min_silence_len=min_silence_len,
+            silence_thresh=silence_thresh,
+            seek_step=50,
+        )
+    ]
+
+
+def split_audio_at_gaps(audio: AudioSegment, gaps: list) -> list:
+    """Cut audio into section chunks at the midpoint of each gap.
+
+    Returns a list of (start_ms, segment) tuples where start_ms is the
+    chunk's absolute offset in the full recording. Cutting mid-gap keeps
+    ~1s of silence padding on each side of the cut.
+    """
+    cut_points = [(start_ms + end_ms) // 2 for start_ms, end_ms in gaps]
+    chunks = []
+    previous_cut = 0
+    for cut in cut_points + [len(audio)]:
+        chunks.append((previous_cut, audio[previous_cut:cut]))
+        previous_cut = cut
+    return chunks
+
+
+def check_single_call_limit(duration_ms: int, description: str) -> None:
+    """Refuse to send more audio in one model call than is reliable.
+
+    Raises ValueError with remediation guidance when duration_ms exceeds
+    MAX_SINGLE_CALL_MINUTES.
+    """
+    if duration_ms > MAX_SINGLE_CALL_MINUTES * 60000:
+        raise ValueError(
+            f"{description} is {format_timestamp(duration_ms)} long, but "
+            "reliable single-call verification tops out at "
+            f"~{MAX_SINGLE_CALL_MINUTES:g} minutes — beyond that Gemini "
+            "reports phantom discrepancies. Add [BREAK] markers to the "
+            "text and regenerate the audio so verification can be chunked."
+        )
+
+
+def verify_audio(audio_path: str, source_text: str, model: str = DEFAULT_MODEL) -> str:
     """Verify a TTS audio recording against its source text using Gemini.
+
+    Runs a deterministic pre-check, then — when the audio's [BREAK]
+    silence gaps pair up with the text's [BREAK] sections — verifies each
+    section separately and aggregates the results. Otherwise verifies the
+    whole file in one call, provided it's short enough to be reliable.
 
     Args:
         audio_path: Path to the audio file (.wav)
@@ -39,26 +155,126 @@ def verify_audio(audio_path: str, source_text: str, model: str = "gemini-2.5-fla
         model: Gemini model to use for verification
 
     Returns:
-        The model's assessment as a string
+        The pre-check stats followed by the model's assessment
 
     Raises:
         FileNotFoundError: If the audio file doesn't exist
+        ValueError: If a single call would need more audio than
+            MAX_SINGLE_CALL_MINUTES allows
     """
     if not os.path.exists(audio_path):
         raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
+    audio = AudioSegment.from_wav(audio_path)
+    precheck = precheck_report(audio, source_text)
+
     client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
-    audio_file = client.files.upload(file=audio_path)
+    sections = split_sections(source_text)
+    gaps = find_section_gaps(audio)
+
+    if len(sections) > 1 and len(gaps) + 1 == len(sections):
+        report = _verify_chunked(client, audio, sections, gaps, model)
+    else:
+        check_single_call_limit(len(audio), "This audio")
+        report = _verify_single(client, audio_path, source_text, model)
+        if len(sections) > 1:
+            report = (
+                f"WARNING: audio has {len(gaps) + 1} audio chunk(s) at "
+                f"[BREAK]-style silence gaps but the text has {len(sections)} "
+                "sections — could not pair them, so the whole file was "
+                f"verified in one call.\n\n{report}"
+            )
+
+    return f"{precheck}\n\n{report}"
+
+
+def _wait_until_active(client, audio_file, poll_seconds: int = 2,
+                       timeout_seconds: int = 300):
+    """Block until an uploaded file finishes processing.
+
+    files.upload() can return while the file is still PROCESSING; querying
+    the model against it then behaves as if no audio were attached. Gives
+    up after timeout_seconds so a file wedged in PROCESSING can't hang the
+    tool indefinitely.
+    """
+    waited = 0
+    while audio_file.state.name == "PROCESSING":
+        if waited >= timeout_seconds:
+            raise RuntimeError(
+                f"Uploaded audio file still PROCESSING after "
+                f"{timeout_seconds}s — giving up."
+            )
+        time.sleep(poll_seconds)
+        waited += poll_seconds
+        audio_file = client.files.get(name=audio_file.name)
+    if audio_file.state.name != "ACTIVE":
+        raise RuntimeError(
+            f"Uploaded audio file ended in state {audio_file.state.name}"
+        )
+    return audio_file
+
+
+def _verify_single(client, audio_path: str, source_text: str, model: str,
+                   context_note: str = "") -> str:
+    """Verify one audio file against its text in a single model call."""
+    audio_file = _wait_until_active(client, client.files.upload(file=audio_path))
 
     prompt = VERIFICATION_PROMPT.format(source_text=source_text)
+    if context_note:
+        prompt = f"{context_note}\n\n{prompt}"
 
-    response = client.models.generate_content(
-        model=model,
-        contents=[prompt, audio_file],
-    )
+    try:
+        response = client.models.generate_content(
+            model=model,
+            contents=[prompt, audio_file],
+        )
+    finally:
+        # Best-effort cleanup so chunked runs don't pile uploads up against
+        # the Files API quota (uploads otherwise linger ~48h).
+        try:
+            client.files.delete(name=audio_file.name)
+        except Exception:
+            pass
 
     return response.text
+
+
+def _verify_chunked(client, audio: AudioSegment, sections: list,
+                    gaps: list, model: str) -> str:
+    """Verify each [BREAK] section separately and aggregate the results."""
+    chunks = split_audio_at_gaps(audio, gaps)
+    total = len(chunks)
+    for i, (_, segment) in enumerate(chunks, start=1):
+        check_single_call_limit(len(segment), f"Section {i} of {total}")
+    parts = [
+        "Note: timestamps within each section below are relative to that "
+        "section's start; the header gives its absolute range."
+    ]
+
+    with tempfile.TemporaryDirectory(prefix="verify_audio_") as temp_dir:
+        for i, ((start_ms, segment), section_text) in enumerate(
+            zip(chunks, sections), start=1
+        ):
+            chunk_path = os.path.join(temp_dir, f"section_{i}.wav")
+            segment.export(chunk_path, format="wav")
+
+            context_note = (
+                f"This audio is section {i} of {total} of a longer recording; "
+                "it may begin and end mid-article."
+            )
+            result = _verify_single(
+                client, chunk_path, section_text, model, context_note
+            )
+
+            end_ms = start_ms + len(segment)
+            header = (
+                f"## Section {i} of {total} "
+                f"({format_timestamp(start_ms)}–{format_timestamp(end_ms)})"
+            )
+            parts.append(f"{header}\n{result}")
+
+    return "\n\n".join(parts)
 
 
 def main(argv=None):
@@ -69,8 +285,8 @@ def main(argv=None):
     parser.add_argument("audio_file", help="Path to the audio file (.wav)")
     parser.add_argument("text_file", help="Path to the source text file")
     parser.add_argument(
-        "--model", default="gemini-2.5-flash",
-        help="Gemini model to use (default: gemini-2.5-flash)"
+        "--model", default=DEFAULT_MODEL,
+        help=f"Gemini model to use (default: {DEFAULT_MODEL})"
     )
 
     args = parser.parse_args(argv)
@@ -84,7 +300,20 @@ def main(argv=None):
         sys.exit(1)
 
     source_text = Path(args.text_file).read_text()
-    result = verify_audio(args.audio_file, source_text, model=args.model)
+    try:
+        result = verify_audio(args.audio_file, source_text, model=args.model)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        if "404" in str(e) or "NOT_FOUND" in str(e):
+            print(
+                f"Error: model '{args.model}' is not available — "
+                f"try --model {DEFAULT_MODEL}. ({e})",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        raise
     print(result)
 
 

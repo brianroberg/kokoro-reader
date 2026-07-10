@@ -15,7 +15,15 @@ from typing import List
 import numpy as np
 import soundfile as sf
 from pydub import AudioSegment
-from mlx_audio.tts.utils import load_model
+
+try:
+    # mlx_audio only imports on Apple Silicon (it pulls in libmlx). Guard it so
+    # dependency-free helpers here (e.g. split_sections) can be imported by
+    # tools like verify_audio.py on any platform. The name stays bound for
+    # generate_audio and for tests that patch text_to_speech.load_model.
+    from mlx_audio.tts.utils import load_model
+except ImportError:  # pragma: no cover - exercised only off Apple Silicon
+    load_model = None
 
 
 def read_text_file(file_path: str) -> str:
@@ -112,6 +120,10 @@ def generate_audio(
 
     sections = split_sections(text)
 
+    if load_model is None:
+        raise RuntimeError(
+            "mlx_audio is unavailable (audio generation requires Apple Silicon)."
+        )
     model = load_model("mlx-community/Kokoro-82M-bf16")
 
     temp_dir = tempfile.mkdtemp(prefix="kokoro_tts_")
