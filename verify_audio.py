@@ -141,6 +141,13 @@ def verify_audio(audio_path: str, source_text: str, model: str = DEFAULT_MODEL) 
         report = _verify_chunked(client, audio, sections, gaps, model)
     else:
         report = _verify_single(client, audio_path, source_text, model)
+        if len(sections) > 1:
+            report = (
+                f"WARNING: audio has {len(gaps) + 1} audio chunk(s) at "
+                f"[BREAK]-style silence gaps but the text has {len(sections)} "
+                "sections — could not pair them, so the whole file was "
+                f"verified in one call.\n\n{report}"
+            )
 
     return f"{precheck}\n\n{report}"
 

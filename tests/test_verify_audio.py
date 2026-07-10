@@ -172,6 +172,23 @@ class TestChunkedVerification:
         assert "## Section 2 of 2 (0:02–0:04)" in result
         assert "relative to" in result  # note explaining in-section timestamps
 
+    @patch("verify_audio.genai")
+    def test_boundary_mismatch_falls_back_to_whole_file_with_warning(
+        self, mock_genai, tmp_path
+    ):
+        """Test gap/section count disagreement warns and verifies whole file."""
+        mock_client = mock_gemini_client(mock_genai)
+        # Two text sections, but audio has no detectable gap
+        audio_path = make_wav(tmp_path / "audio.wav", [("tone", 2000)])
+
+        result = verify_audio(audio_path, self.TWO_SECTION_TEXT)
+
+        assert mock_client.models.generate_content.call_count == 1
+        prompt = str(mock_client.models.generate_content.call_args)
+        assert "Alpha" in prompt and "Beta" in prompt
+        assert "WARNING" in result
+        assert "1 audio chunk" in result and "2 sections" in result
+
 
 class TestFormatTimestamp:
     """Test millisecond-to-MM:SS formatting."""
