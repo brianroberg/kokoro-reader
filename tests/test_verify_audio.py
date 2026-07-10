@@ -173,6 +173,20 @@ class TestChunkedVerification:
         assert "relative to" in result  # note explaining in-section timestamps
 
     @patch("verify_audio.genai")
+    def test_single_section_text_verifies_whole_file_without_warning(
+        self, mock_genai, tmp_path
+    ):
+        """Test text without [BREAK] keeps the plain whole-file behavior."""
+        mock_client = mock_gemini_client(mock_genai)
+        audio_path = make_wav(tmp_path / "audio.wav", [("tone", 2000)])
+
+        result = verify_audio(audio_path, "Just one plain section of text.")
+
+        assert mock_client.models.generate_content.call_count == 1
+        assert "could not pair" not in result
+        assert "## Section" not in result
+
+    @patch("verify_audio.genai")
     def test_boundary_mismatch_falls_back_to_whole_file_with_warning(
         self, mock_genai, tmp_path
     ):
@@ -188,6 +202,70 @@ class TestChunkedVerification:
         assert "Alpha" in prompt and "Beta" in prompt
         assert "WARNING" in result
         assert "1 audio chunk" in result and "2 sections" in result
+
+
+class TestSingleCallLimit:
+    """Test that no single model call carries more audio than the threshold.
+
+    Whole-file comparison is only reliable below MAX_SINGLE_CALL_MINUTES
+    (issue #4); beyond it the tool must refuse rather than degrade. Tests
+    shrink the threshold so fixtures stay tiny.
+    """
+
+    TWO_SECTION_TEXT = "Alpha section text.\n\n[BREAK]\n\nBeta section text."
+
+    @patch("verify_audio.genai")
+    def test_long_audio_without_breaks_is_rejected(
+        self, mock_genai, tmp_path, monkeypatch
+    ):
+        """Test single-section text with over-threshold audio raises."""
+        mock_client = mock_gemini_client(mock_genai)
+        monkeypatch.setattr("verify_audio.MAX_SINGLE_CALL_MINUTES", 3 / 60)
+        audio_path = make_wav(tmp_path / "audio.wav", [("tone", 4000)])
+
+        with pytest.raises(ValueError, match="[BREAK]"):
+            verify_audio(audio_path, "No break markers here.")
+        mock_client.models.generate_content.assert_not_called()
+
+    @patch("verify_audio.genai")
+    def test_long_audio_with_mismatched_breaks_is_rejected(
+        self, mock_genai, tmp_path, monkeypatch
+    ):
+        """Test the mismatch fallback also refuses over-threshold audio."""
+        mock_client = mock_gemini_client(mock_genai)
+        monkeypatch.setattr("verify_audio.MAX_SINGLE_CALL_MINUTES", 3 / 60)
+        # Two text sections but no detectable gap: fallback path, too long
+        audio_path = make_wav(tmp_path / "audio.wav", [("tone", 4000)])
+
+        with pytest.raises(ValueError):
+            verify_audio(audio_path, self.TWO_SECTION_TEXT)
+        mock_client.models.generate_content.assert_not_called()
+
+    @patch("verify_audio.genai")
+    def test_oversized_single_chunk_is_rejected(
+        self, mock_genai, tmp_path, monkeypatch
+    ):
+        """Test chunking doesn't help if one section alone exceeds the limit."""
+        mock_client = mock_gemini_client(mock_genai)
+        monkeypatch.setattr("verify_audio.MAX_SINGLE_CALL_MINUTES", 3 / 60)
+        audio_path = make_wav(
+            tmp_path / "audio.wav",
+            [("tone", 4000), ("silence", 2000), ("tone", 1000)],
+        )
+
+        with pytest.raises(ValueError):
+            verify_audio(audio_path, self.TWO_SECTION_TEXT)
+        mock_client.models.generate_content.assert_not_called()
+
+    @patch("verify_audio.genai")
+    def test_short_audio_is_not_rejected(self, mock_genai, tmp_path, monkeypatch):
+        """Test under-threshold whole-file verification still works."""
+        mock_gemini_client(mock_genai)
+        monkeypatch.setattr("verify_audio.MAX_SINGLE_CALL_MINUTES", 3 / 60)
+        audio_path = make_wav(tmp_path / "audio.wav", [("tone", 2000)])
+
+        result = verify_audio(audio_path, "Short enough.")
+        assert "No issues found." in result
 
 
 class TestFormatTimestamp:
@@ -372,6 +450,26 @@ class TestCLI:
         captured = capsys.readouterr()
         assert "gemini-nonexistent" in captured.err
         assert "not available" in captured.err
+
+    @patch("verify_audio.verify_audio")
+    def test_cli_over_threshold_audio_exits_with_clear_error(
+        self, mock_verify, tmp_path, capsys
+    ):
+        """Test the CLI turns the too-long-for-one-call error into exit 1."""
+        mock_verify.side_effect = ValueError(
+            "audio is 28:00 long, but reliable single-call verification "
+            "tops out at ~20 minutes"
+        )
+        audio_path = make_wav(tmp_path / "audio.wav")
+        text_path = tmp_path / "source.txt"
+        text_path.write_text("Some text.")
+
+        with pytest.raises(SystemExit) as exc_info:
+            main([audio_path, str(text_path)])
+
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "28:00" in captured.err
 
     @patch("verify_audio.verify_audio")
     def test_cli_reraises_unrelated_errors(self, mock_verify, tmp_path):

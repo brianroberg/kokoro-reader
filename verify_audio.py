@@ -22,6 +22,12 @@ load_dotenv()
 
 DEFAULT_MODEL = "gemini-flash-latest"
 
+# Longest stretch of audio one generate_content call can be trusted with.
+# Beyond this, whole-file comparison starts producing phantom
+# missing-content reports (issue #4): ~16 minutes was reliable, ~28 was
+# not. Calibrated empirically; see the issue for the methodology.
+MAX_SINGLE_CALL_MINUTES = 20
+
 VERIFICATION_PROMPT = """Here is the source text of an article, and an audio recording of it being read aloud. Compare them carefully. Report:
 
 - Words that are mispronounced or garbled
@@ -112,6 +118,22 @@ def split_audio_at_gaps(audio: AudioSegment, gaps: list) -> list:
     return chunks
 
 
+def check_single_call_limit(duration_ms: int, description: str) -> None:
+    """Refuse to send more audio in one model call than is reliable.
+
+    Raises ValueError with remediation guidance when duration_ms exceeds
+    MAX_SINGLE_CALL_MINUTES.
+    """
+    if duration_ms > MAX_SINGLE_CALL_MINUTES * 60000:
+        raise ValueError(
+            f"{description} is {format_timestamp(duration_ms)} long, but "
+            "reliable single-call verification tops out at "
+            f"~{MAX_SINGLE_CALL_MINUTES:g} minutes — beyond that Gemini "
+            "reports phantom discrepancies. Add [BREAK] markers to the "
+            "text and regenerate the audio so verification can be chunked."
+        )
+
+
 def verify_audio(audio_path: str, source_text: str, model: str = DEFAULT_MODEL) -> str:
     """Verify a TTS audio recording against its source text using Gemini.
 
@@ -140,6 +162,7 @@ def verify_audio(audio_path: str, source_text: str, model: str = DEFAULT_MODEL) 
     if len(sections) > 1 and len(gaps) + 1 == len(sections):
         report = _verify_chunked(client, audio, sections, gaps, model)
     else:
+        check_single_call_limit(len(audio), "This audio")
         report = _verify_single(client, audio_path, source_text, model)
         if len(sections) > 1:
             report = (
@@ -174,6 +197,8 @@ def _verify_chunked(client, audio: AudioSegment, sections: list,
     """Verify each [BREAK] section separately and aggregate the results."""
     chunks = split_audio_at_gaps(audio, gaps)
     total = len(chunks)
+    for i, (_, segment) in enumerate(chunks, start=1):
+        check_single_call_limit(len(segment), f"Section {i} of {total}")
     parts = [
         "Note: timestamps within each section below are relative to that "
         "section's start; the header gives its absolute range."
@@ -229,6 +254,9 @@ def main(argv=None):
     source_text = Path(args.text_file).read_text()
     try:
         result = verify_audio(args.audio_file, source_text, model=args.model)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
     except Exception as e:
         if "404" in str(e) or "NOT_FOUND" in str(e):
             print(
