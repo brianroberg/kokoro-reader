@@ -93,6 +93,22 @@ def find_section_gaps(
     ]
 
 
+def split_audio_at_gaps(audio: AudioSegment, gaps: list) -> list:
+    """Cut audio into section chunks at the midpoint of each gap.
+
+    Returns a list of (start_ms, segment) tuples where start_ms is the
+    chunk's absolute offset in the full recording. Cutting mid-gap keeps
+    ~1s of silence padding on each side of the cut.
+    """
+    cut_points = [(start_ms + end_ms) // 2 for start_ms, end_ms in gaps]
+    chunks = []
+    previous_cut = 0
+    for cut in cut_points + [len(audio)]:
+        chunks.append((previous_cut, audio[previous_cut:cut]))
+        previous_cut = cut
+    return chunks
+
+
 def verify_audio(audio_path: str, source_text: str, model: str = DEFAULT_MODEL) -> str:
     """Verify a TTS audio recording against its source text using Gemini.
 

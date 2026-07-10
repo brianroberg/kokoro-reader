@@ -16,6 +16,7 @@ from verify_audio import (
     precheck_report,
     format_timestamp,
     find_section_gaps,
+    split_audio_at_gaps,
 )
 
 
@@ -220,6 +221,34 @@ class TestFindSectionGaps:
         audio = make_segment([("tone", 1000), ("silence", 300), ("tone", 1000)])
 
         assert find_section_gaps(audio) == []
+
+
+class TestSplitAudioAtGaps:
+    """Test cutting audio into section chunks at detected gaps."""
+
+    def test_splits_at_gap_midpoint(self):
+        """Test one gap yields two chunks cut at its midpoint, with offsets."""
+        audio = make_segment([("tone", 1000), ("silence", 2000), ("tone", 1000)])
+
+        chunks = split_audio_at_gaps(audio, [(1000, 3000)])
+
+        assert len(chunks) == 2
+        (first_start, first_seg), (second_start, second_seg) = chunks
+        assert first_start == 0
+        assert second_start == 2000  # midpoint of the gap
+        assert len(first_seg) == 2000
+        assert len(second_seg) == 2000
+        assert len(first_seg) + len(second_seg) == len(audio)
+
+    def test_no_gaps_returns_whole_audio(self):
+        """Test that with no gaps the audio comes back as a single chunk."""
+        audio = make_segment([("tone", 1000)])
+
+        chunks = split_audio_at_gaps(audio, [])
+
+        assert len(chunks) == 1
+        assert chunks[0][0] == 0
+        assert len(chunks[0][1]) == len(audio)
 
 
 class TestCLI:
