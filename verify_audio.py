@@ -82,14 +82,17 @@ def precheck_report(audio: AudioSegment, source_text: str) -> str:
 
 def find_section_gaps(
     audio: AudioSegment,
-    min_silence_len: int = 1500,
+    min_silence_len: int = 2500,
     silence_thresh: int = -40,
 ) -> list:
     """Find the silence gaps inserted at [BREAK] section boundaries.
 
     text_to_speech.py inserts 2000ms of silence at each [BREAK] and only
-    300ms between ordinary chunks, so a 1500ms minimum cleanly separates
-    the two. Returns a list of (start_ms, end_ms) tuples.
+    300ms between ordinary chunks — but Kokoro's own trailing quiet at
+    paragraph ends stretches both: in real recordings ordinary joins
+    measure ~1.5-2.0s of silence and [BREAK] joins ~3.2-3.4s. A 2500ms
+    minimum separates the two populations. Returns a list of
+    (start_ms, end_ms) tuples.
     """
     return [
         (start_ms, end_ms)

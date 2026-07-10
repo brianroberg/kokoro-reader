@@ -132,7 +132,7 @@ class TestChunkedVerification:
     """Test that [BREAK]-sectioned recordings are verified chunk by chunk."""
 
     TWO_SECTION_TEXT = "Alpha section text.\n\n[BREAK]\n\nBeta section text."
-    TWO_SECTION_SPEC = [("tone", 1000), ("silence", 2000), ("tone", 1000)]
+    TWO_SECTION_SPEC = [("tone", 1000), ("silence", 3200), ("tone", 1000)]
 
     @patch("verify_audio.genai")
     def test_verifies_each_section_against_its_text_slice(self, mock_genai, tmp_path):
@@ -169,7 +169,7 @@ class TestChunkedVerification:
         result = verify_audio(audio_path, self.TWO_SECTION_TEXT)
 
         assert "## Section 1 of 2 (0:00–0:02)" in result
-        assert "## Section 2 of 2 (0:02–0:04)" in result
+        assert "## Section 2 of 2 (0:02–0:05)" in result
         assert "relative to" in result  # note explaining in-section timestamps
 
     @patch("verify_audio.genai")
@@ -250,7 +250,7 @@ class TestSingleCallLimit:
         monkeypatch.setattr("verify_audio.MAX_SINGLE_CALL_MINUTES", 3 / 60)
         audio_path = make_wav(
             tmp_path / "audio.wav",
-            [("tone", 4000), ("silence", 2000), ("tone", 1000)],
+            [("tone", 4000), ("silence", 3200), ("tone", 1000)],
         )
 
         with pytest.raises(ValueError):
@@ -333,8 +333,8 @@ class TestPrecheckReport:
         assert "0:30" in report  # the silence starts 30s in
 
     def test_no_warning_for_normal_break_silence(self):
-        """Test an ordinary ~2s [BREAK] gap does not trigger the silence warning."""
-        audio = make_segment([("tone", 30000), ("silence", 2000), ("tone", 30000)])
+        """Test an ordinary ~3.2s [BREAK] gap does not trigger the silence warning."""
+        audio = make_segment([("tone", 30000), ("silence", 3200), ("tone", 30000)])
         text = " ".join(["word"] * 150)
 
         report = precheck_report(audio, text)
@@ -343,18 +343,30 @@ class TestPrecheckReport:
 
 
 class TestFindSectionGaps:
-    """Test detection of the ~2s silences inserted at [BREAK] boundaries."""
+    """Test detection of the silences at [BREAK] boundaries.
+
+    In real Kokoro output, Kokoro's own trailing quiet at paragraph ends
+    stretches every join: ordinary 300ms joins measure ~1.5-2.0s of
+    silence, [BREAK] joins (2000ms inserted) measure ~3.2-3.4s. Only the
+    latter mark section boundaries.
+    """
 
     def test_finds_break_gap(self):
-        """Test a 2s silence between tones is reported as one gap."""
-        audio = make_segment([("tone", 1000), ("silence", 2000), ("tone", 1000)])
+        """Test a [BREAK]-sized (~3.2s) silence is reported as one gap."""
+        audio = make_segment([("tone", 1000), ("silence", 3200), ("tone", 1000)])
 
         gaps = find_section_gaps(audio)
 
         assert len(gaps) == 1
         start_ms, end_ms = gaps[0]
         assert start_ms == pytest.approx(1000, abs=200)
-        assert end_ms == pytest.approx(3000, abs=200)
+        assert end_ms == pytest.approx(4200, abs=200)
+
+    def test_ignores_paragraph_sized_pauses(self):
+        """Test the ~2s silences at ordinary paragraph joins are not gaps."""
+        audio = make_segment([("tone", 1000), ("silence", 2000), ("tone", 1000)])
+
+        assert find_section_gaps(audio) == []
 
     def test_ignores_short_intra_section_pauses(self):
         """Test the 300ms pauses between ordinary TTS chunks are not gaps."""
