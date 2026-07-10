@@ -145,6 +145,24 @@ class TestPrecheckReport:
 
         assert "10 words" in report
 
+    def test_warns_when_pace_is_implausibly_slow(self):
+        """Test a WPM far below speech pace (suggesting missing text) warns."""
+        audio = make_segment([("tone", 60000)])
+        text = " ".join(["word"] * 10)  # 10 WPM
+
+        report = precheck_report(audio, text)
+
+        assert "WARNING" in report
+
+    def test_no_warning_at_normal_speech_pace(self):
+        """Test a normal reading pace produces no warning."""
+        audio = make_segment([("tone", 60000)])
+        text = " ".join(["word"] * 150)  # 150 WPM
+
+        report = precheck_report(audio, text)
+
+        assert "WARNING" not in report
+
 
 class TestCLI:
     """Test the command-line interface."""

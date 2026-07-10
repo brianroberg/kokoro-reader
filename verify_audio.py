@@ -50,11 +50,17 @@ def precheck_report(audio: AudioSegment, source_text: str) -> str:
     word_count = len(re.sub(r"\[BREAK\]", " ", source_text).split())
     wpm = word_count / (duration_ms / 60000) if duration_ms else 0
 
-    return (
-        "## Pre-check (deterministic)\n"
+    lines = [
+        "## Pre-check (deterministic)",
         f"Duration: {format_timestamp(duration_ms)} | "
-        f"{word_count} words | {wpm:.0f} WPM"
-    )
+        f"{word_count} words | {wpm:.0f} WPM",
+    ]
+    if not 100 <= wpm <= 250:
+        lines.append(
+            f"WARNING: pace of {wpm:.0f} WPM is outside the normal speech "
+            "range (100-250) — audio may be truncated or have extra content."
+        )
+    return "\n".join(lines)
 
 
 def verify_audio(audio_path: str, source_text: str, model: str = DEFAULT_MODEL) -> str:
