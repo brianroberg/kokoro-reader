@@ -62,7 +62,7 @@ def precheck_report(audio: AudioSegment, source_text: str) -> str:
             "range (100-250) — audio may be truncated or have extra content."
         )
     for start_ms, end_ms in detect_silence(
-        audio, min_silence_len=5000, silence_thresh=-40
+        audio, min_silence_len=5000, silence_thresh=-40, seek_step=100
     ):
         lines.append(
             f"WARNING: {format_timestamp(end_ms - start_ms)} of silence at "
