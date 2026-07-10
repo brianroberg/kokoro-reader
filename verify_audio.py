@@ -24,10 +24,13 @@ load_dotenv()
 DEFAULT_MODEL = "gemini-flash-latest"
 
 # Longest stretch of audio one generate_content call can be trusted with.
-# Beyond this, whole-file comparison starts producing phantom
-# missing-content reports (issue #4): ~16 minutes was reliable, ~28 was
-# not. Calibrated empirically; see the issue for the methodology.
-MAX_SINGLE_CALL_MINUTES = 20
+# Calibrated empirically on known audio (issue #4): at 11.4 minutes,
+# repeated runs were consistent and caught a real mispronunciation every
+# time; at 17.5 minutes, 1 in 4 runs reported phantom missing content
+# and all 4 missed that same real issue; at 28 minutes phantoms were
+# reproducible. 15 sits above every real [BREAK] section (max 13.5 min)
+# and below the shortest length where comparison degraded.
+MAX_SINGLE_CALL_MINUTES = 15
 
 VERIFICATION_PROMPT = """Here is the source text of an article, and an audio recording of it being read aloud. Compare them carefully. Report:
 

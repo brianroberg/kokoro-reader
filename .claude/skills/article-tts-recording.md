@@ -110,7 +110,7 @@ This sends the audio and source text to Gemini (default model: `gemini-flash-lat
 
 The report opens with a deterministic pre-check (duration, word count, reading pace, unexpected long silences) that costs nothing and catches truncation-class problems. When the article's `[BREAK]` markers line up with the silence gaps in the audio, each section is verified separately and reported under a header like `## Section 2 of 5 (12:34–25:10)` — timestamps inside a section are **relative to that section's start**; add the section's start offset to locate an issue in the full recording.
 
-If the recording is longer than ~20 minutes and its sections can't be paired with the text's `[BREAK]` markers, verification refuses to run (long single-call comparison produces phantom "missing content" reports). Fix the `[BREAK]` structure or regenerate the audio, then re-verify.
+If the recording is longer than ~15 minutes and its sections can't be paired with the text's `[BREAK]` markers, verification refuses to run (long single-call comparison produces phantom "missing content" reports). Fix the `[BREAK]` structure or regenerate the audio, then re-verify.
 
 Cost: ~3 cents per verification of a 16-minute article.
 
