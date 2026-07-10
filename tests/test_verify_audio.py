@@ -151,6 +151,35 @@ class TestCLI:
         call_args = mock_verify.call_args
         assert call_args.kwargs.get("model") == "gemini-flash-latest"
 
+    @patch("verify_audio.verify_audio")
+    def test_cli_unavailable_model_exits_with_clear_error(self, mock_verify, tmp_path, capsys):
+        """Test CLI reports a clear error (not a traceback) when the model 404s."""
+        mock_verify.side_effect = Exception(
+            "404 NOT_FOUND: models/gemini-nonexistent is not found"
+        )
+        audio_path = make_wav(tmp_path / "audio.wav")
+        text_path = tmp_path / "source.txt"
+        text_path.write_text("Some text.")
+
+        with pytest.raises(SystemExit) as exc_info:
+            main([audio_path, str(text_path), "--model", "gemini-nonexistent"])
+
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "gemini-nonexistent" in captured.err
+        assert "not available" in captured.err
+
+    @patch("verify_audio.verify_audio")
+    def test_cli_reraises_unrelated_errors(self, mock_verify, tmp_path):
+        """Test CLI doesn't swallow errors that aren't about a missing model."""
+        mock_verify.side_effect = Exception("connection reset by peer")
+        audio_path = make_wav(tmp_path / "audio.wav")
+        text_path = tmp_path / "source.txt"
+        text_path.write_text("Some text.")
+
+        with pytest.raises(Exception, match="connection reset"):
+            main([audio_path, str(text_path)])
+
     def test_cli_missing_audio_file_exits(self, tmp_path):
         """Test CLI exits with error for missing audio file."""
         text_path = tmp_path / "source.txt"

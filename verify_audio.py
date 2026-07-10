@@ -86,7 +86,17 @@ def main(argv=None):
         sys.exit(1)
 
     source_text = Path(args.text_file).read_text()
-    result = verify_audio(args.audio_file, source_text, model=args.model)
+    try:
+        result = verify_audio(args.audio_file, source_text, model=args.model)
+    except Exception as e:
+        if "404" in str(e) or "NOT_FOUND" in str(e):
+            print(
+                f"Error: model '{args.model}' is not available — "
+                f"try --model {DEFAULT_MODEL}. ({e})",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        raise
     print(result)
 
 
