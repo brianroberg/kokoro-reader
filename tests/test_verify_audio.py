@@ -10,7 +10,7 @@ from unittest.mock import patch, MagicMock
 from pydub import AudioSegment
 from pydub.generators import Sine
 
-from verify_audio import verify_audio, main
+from verify_audio import verify_audio, main, precheck_report, format_timestamp
 
 
 def make_segment(spec):
@@ -107,6 +107,43 @@ class TestVerifyAudio:
         """Test that a missing audio file raises FileNotFoundError."""
         with pytest.raises(FileNotFoundError):
             verify_audio("/nonexistent/audio.wav", "Some text.")
+
+
+class TestFormatTimestamp:
+    """Test millisecond-to-MM:SS formatting."""
+
+    def test_formats_minutes_and_seconds(self):
+        assert format_timestamp(754000) == "12:34"
+
+    def test_pads_seconds(self):
+        assert format_timestamp(4000) == "0:04"
+
+    def test_formats_over_an_hour(self):
+        assert format_timestamp(3723000) == "62:03"
+
+
+class TestPrecheckReport:
+    """Test the deterministic pre-check that runs before any model call."""
+
+    def test_reports_duration_word_count_and_pace(self):
+        """Test the report includes duration, word count, and words per minute."""
+        audio = make_segment([("tone", 4000)])
+        text = "one two three four five six seven eight nine ten"
+
+        report = precheck_report(audio, text)
+
+        assert "0:04" in report
+        assert "10 words" in report
+        assert "150" in report  # 10 words / 4s = 150 WPM
+
+    def test_break_markers_not_counted_as_words(self):
+        """Test [BREAK] markers are excluded from the word count."""
+        audio = make_segment([("tone", 4000)])
+        text = "one two three four five\n[BREAK]\nsix seven eight nine ten"
+
+        report = precheck_report(audio, text)
+
+        assert "10 words" in report
 
 
 class TestCLI:

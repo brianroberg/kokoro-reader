@@ -7,10 +7,12 @@ mispronunciations, missing content, and other issues.
 
 import argparse
 import os
+import re
 import sys
 from pathlib import Path
 from google import genai
 from dotenv import load_dotenv
+from pydub import AudioSegment
 
 load_dotenv()
 
@@ -30,6 +32,29 @@ If the recording is faithful to the source text with no issues, say "No issues f
 
 SOURCE TEXT:
 {source_text}"""
+
+
+def format_timestamp(ms: int) -> str:
+    """Format a millisecond offset as M:SS (e.g. 754000 -> "12:34")."""
+    total_seconds = int(ms // 1000)
+    return f"{total_seconds // 60}:{total_seconds % 60:02d}"
+
+
+def precheck_report(audio: AudioSegment, source_text: str) -> str:
+    """Deterministic sanity checks that run before any model call.
+
+    Reports audio duration, source word count, and effective words per
+    minute. Costs nothing — no API call involved.
+    """
+    duration_ms = len(audio)
+    word_count = len(re.sub(r"\[BREAK\]", " ", source_text).split())
+    wpm = word_count / (duration_ms / 60000) if duration_ms else 0
+
+    return (
+        "## Pre-check (deterministic)\n"
+        f"Duration: {format_timestamp(duration_ms)} | "
+        f"{word_count} words | {wpm:.0f} WPM"
+    )
 
 
 def verify_audio(audio_path: str, source_text: str, model: str = DEFAULT_MODEL) -> str:
