@@ -88,6 +88,9 @@ def verify_audio(audio_path: str, source_text: str, model: str = DEFAULT_MODEL) 
     if not os.path.exists(audio_path):
         raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
+    audio = AudioSegment.from_wav(audio_path)
+    precheck = precheck_report(audio, source_text)
+
     client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
     audio_file = client.files.upload(file=audio_path)
@@ -99,7 +102,7 @@ def verify_audio(audio_path: str, source_text: str, model: str = DEFAULT_MODEL) 
         contents=[prompt, audio_file],
     )
 
-    return response.text
+    return f"{precheck}\n\n{response.text}"
 
 
 def main(argv=None):

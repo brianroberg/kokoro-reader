@@ -94,6 +94,18 @@ class TestVerifyAudio:
         assert call_args.kwargs.get("model") == "gemini-2.5-pro" or "gemini-2.5-pro" in str(call_args)
 
     @patch("verify_audio.genai")
+    def test_report_starts_with_precheck(self, mock_genai, tmp_path):
+        """Test the returned report leads with the deterministic pre-check."""
+        mock_gemini_client(mock_genai, "No issues found.")
+        audio_path = make_wav(tmp_path / "audio.wav", [("tone", 4000)])
+
+        result = verify_audio(audio_path, "one two three four five six seven eight nine ten")
+
+        assert result.startswith("## Pre-check")
+        assert "0:04" in result
+        assert "No issues found." in result
+
+    @patch("verify_audio.genai")
     def test_default_model_is_maintained_alias(self, mock_genai, tmp_path):
         """Test that the default model is the maintained gemini-flash-latest alias."""
         mock_client = mock_gemini_client(mock_genai)
