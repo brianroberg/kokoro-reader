@@ -29,7 +29,7 @@
 1. **A JSON-LD graph whose author is an `@id` reference to a `Person` node.** The real New Atlantis page has exactly this shape. The author must come out as the person's name, not empty and not the URL. Test in Task 2.
 2. **The site-wide header names the *current* issue on every page** (a nav link reading "No. 86 – Fall 2026"), and "Related" cards link other issues. The edition must come from the article's own header `aside` (the `/issues/no-NN-season-year` link next to the `h1`), never from a page-wide search. Otherwise an older article, or a web-only one, is labelled with the current issue. Test in Task 2.
 3. **No `datePublished` at all.** The date falls back to the start of the edition's season, not to today and not to nothing. Test in Task 2.
-4. **`AGENTBOX_GITHUB=off` with GitHub unreachable.** The firewall must not even try to fetch GitHub's IP ranges, and the sandbox must start. Test in Task 4.
+4. **`AGENTBOX_GITHUB=off` with GitHub unreachable.** The firewall must not even try to fetch GitHub's IP ranges, and the sandbox must start. That includes the script's post-lockdown reachability check, which today probes `api.github.com` and would fail closed; it must probe a host that is always allowed (`api.anthropic.com`). Test in Task 4.
 5. **An entrypoint given a command.** It must still apply the firewall before running it, and run it as `node`, never as root. Test in Task 3.
 
 ---
@@ -78,10 +78,10 @@ mkdir -p .claude/skills/recording-article-audio
 git mv .claude/skills/article-tts-recording.md .claude/skills/recording-article-audio/SKILL.md
 sed -i 's/^name: article-tts-recording$/name: recording-article-audio/' .claude/skills/recording-article-audio/SKILL.md
 sed -i 's#\.claude/skills/article-tts-recording\.md#.claude/skills/recording-article-audio/SKILL.md#g; s#/article-tts-recording#/recording-article-audio#g' README.md docs/adr-001-no-orchestration-script.md
-grep -rn "article-tts-recording" . --include=*.md --include=*.py | grep -v docs/superpowers
+grep -rn "article-tts-recording" . --include=*.md --include=*.py | grep -v -e docs/superpowers -e tests/test_readme_docs.py
 ```
 
-  Expected: the final `grep` prints nothing. The plan and spec documents keep the old name on purpose, because they describe the rename.
+  Expected: the final `grep` prints nothing. The plan and spec documents keep the old name on purpose, because they describe the rename, and `tests/test_readme_docs.py` names it (twice) to assert it's gone; both are excluded.
 - [ ] **Step 4: Run the whole suite and see it pass.** Run `uv run python -m pytest -q`. On Linux, tests that need MLX skip or are mocked as they are today. Expected: everything that passed before still passes, plus the two new tests.
 - [ ] **Step 5: Commit.**
 
@@ -100,7 +100,7 @@ git commit -m "Rename the skill to recording-article-audio, in the SKILL.md layo
 - The page's JSON-LD is a Yoast **`@graph`**: `{"@context": …, "@graph": [Article, WebPage, Person, …]}`. The extractor looks only for a top-level `"@type": "Article"`, so on today's pages it silently falls back to the `<h1>` and the byline, and never reads `datePublished`.
 - In the graph, `Article.author` is `{"@id": "…/authors/joseph-lawler#person"}`, a reference that is resolved through the `Person` node's `name`.
 - The description is in `<meta property="og:description">`, in `<meta name="description">`, and in the `WebPage` node.
-- **The article's edition is a link in its header `aside`,** beside the `h1`: `<a class="link-transition" href="https://www.thenewatlantis.com/issues/no-86-fall-2026">Fall 2026</a>`. A web-only piece's `aside` has the type and a date but no `/issues/` link. Spike S4 checked this on three pages on 2026-10-14.
+- **The article's edition is a link in its header `aside`,** which sits in the block just before the `h1`'s own block (`div.container > [div > aside, div > h1]`; `zoning-alone` has one more `div` around that pair): `<a class="link-transition" href="https://www.thenewatlantis.com/issues/no-86-fall-2026">Fall 2026</a>`. A web-only piece's `aside` has the type and a date but no `/issues/` link. Spike S4 checked this on three pages on 2026-10-14, and the review re-checked the shape on three (`zoning-alone`, the web-only AGI piece, and a 2006 piece).
 - ⚠️ **The text "No. 86 – Fall 2026" also appears on every page,** in a site-wide nav link to the *current* issue. "Related" cards link other issues too. The existing page-wide regexes (`No. N (Season Year)`, then any "Season Year" text) can therefore attach the current issue to any article. On today's layout, read the `aside` only, and keep the page-wide search only as a fallback for pages without that header (old layouts, and this repo's existing tests).
 - **Subscriber-only ("gated") pages still serve their full text.** `zoning-alone` is gated, and its `div.gutenberg-content` has 4,415 words. This matches this repo's commit cc0927c, "New Atlantis serves full content without auth".
 
@@ -120,13 +120,9 @@ git commit -m "Rename the skill to recording-article-audio, in the SKILL.md layo
   A missing key means the value was absent. Plan 3's runner calls this.
 - Produces: `season_start_date(season: str, year: int) -> str | None`, returning `"YYYY-MM-DD"`.
 
-- [ ] **Step 1: Write the failing tests** (append to `tests/test_extractors.py`). The HTML mirrors the live page's structure:
+- [ ] **Step 1: Write the failing tests.** In `tests/test_extractors.py`, add `_edition_from_header` and `season_start_date` to the existing `from article_assistant import (...)` block and `from bs4 import BeautifulSoup` beside the other imports at the top (imports appended lower down fail ruff's E402), then append the rest. The HTML mirrors the live page's structure, and the snippets are already in `ruff format`'s shape:
 
 ```python
-import json as _json
-
-from article_assistant import NewAtlantisExtractor, season_start_date
-
 GRAPH_PAGE = """
 <html><head>
 <meta name="description" content="Zoning made us lonely. The Court may end it.">
@@ -144,18 +140,31 @@ GRAPH_PAGE = """
 </script></head>
 <body>
 <nav><div class="hidden lg:block"><a class="link-transition" href="https://www.thenewatlantis.com/issues/no-87-winter-2027">No. 87 – Winter 2027</a></div></nav>
-<div class="article-header"><div><h1>Zoning Alone</h1></div>
-  <aside><span>Essay</span><a class="link-transition" href="https://www.thenewatlantis.com/issues/no-86-fall-2026">Fall 2026</a></aside></div>
-<div class="gutenberg-content"><p>Body.</p></div>
-<section class="related"><a href="https://www.thenewatlantis.com/issues/no-23-winter-2009">Winter 2009</a></section>
+<div class="container">
+  <div class="block text-center lg:hidden"><aside><p><a href="https://www.thenewatlantis.com/article_type/essay">Essay</a></p>
+    <p><a class="link-transition" href="https://www.thenewatlantis.com/issues/no-86-fall-2026">Fall 2026</a></p></aside></div>
+  <div class="text-center"><h1>Zoning Alone</h1></div>
+</div>
+<div class="container"><div class="gutenberg-content"><p>Body.</p></div></div>
+<div class="container"><h5>Related</h5><article class="card"><p><a href="https://www.thenewatlantis.com/issues/no-23-winter-2009">Winter 2009</a></p></article></div>
 </body></html>
 """
 WEB_ONLY_PAGE = """
 <html><body>
 <nav><div class="hidden lg:block"><a class="link-transition" href="https://www.thenewatlantis.com/issues/no-86-fall-2026">No. 86 – Fall 2026</a></div></nav>
-<div class="article-header"><div><h1>Are We Really on the Path to AGI?</h1></div>
-  <aside><span>Essay</span><span>October 7, 2026</span></aside></div>
-<section class="related"><a href="https://www.thenewatlantis.com/issues/no-85-summer-2026">Summer 2026</a></section>
+<div class="container">
+  <div class="block text-center lg:hidden"><aside><p><a href="https://www.thenewatlantis.com/article_type/essay">Essay</a></p>
+    <p>October 7, 2026</p></aside></div>
+  <div class="text-center"><h1>Are We Really on the Path to AGI?</h1></div>
+</div>
+<div class="container"><h5>Related</h5><article class="card"><p><a href="https://www.thenewatlantis.com/issues/no-85-summer-2026">Summer 2026</a></p></article></div>
+</body></html>
+"""
+WIDE_WRAPPER_PAGE = """
+<html><body>
+<main><div><h1>An Older Piece</h1></div>
+  <div class="gutenberg-content"><p>Body.</p></div>
+  <aside class="related"><a href="https://www.thenewatlantis.com/issues/no-85-summer-2026">Summer 2026</a></aside></main>
 </body></html>
 """
 URL = "https://www.thenewatlantis.com/publications/zoning-alone"
@@ -183,15 +192,29 @@ class TestNewAtlantisGraph:
         md = NewAtlantisExtractor().extract_metadata(WEB_ONLY_PAGE, URL)
         assert "issue_number" not in md and "issue_season" not in md
 
+    def test_related_aside_under_a_wide_wrapper_is_not_the_header(self):
+        # The h1's grandparent is the whole page, and the only aside below it
+        # is a Related card for another issue. The header reader must not take
+        # it; what the page-wide fallback then makes of "Summer 2026" is that
+        # fallback's own, known limitation.
+        assert (
+            _edition_from_header(BeautifulSoup(WIDE_WRAPPER_PAGE, "html.parser"))
+            is None
+        )
+
     def test_parenthesised_issue_marker_still_works(self):
-        page = "<html><body><h1>T</h1><p>From No. 79 (Winter 2025) issue</p></body></html>"
+        page = (
+            "<html><body><h1>T</h1><p>From No. 79 (Winter 2025) issue</p></body></html>"
+        )
         md = NewAtlantisExtractor().extract_metadata(page, URL)
         assert (md["issue_number"], md["issue_season"]) == ("79", "Winter 2025")
 
     def test_date_falls_back_to_the_season_start(self):
-        page = ('<html><body><div><div><h1>T</h1></div><aside>'
-                '<a href="https://www.thenewatlantis.com/issues/no-86-fall-2026">Fall 2026</a>'
-                '</aside></div></body></html>')
+        page = (
+            "<html><body><div><div><h1>T</h1></div><aside>"
+            '<a href="https://www.thenewatlantis.com/issues/no-86-fall-2026">Fall 2026</a>'
+            "</aside></div></body></html>"
+        )
         md = NewAtlantisExtractor().extract_metadata(page, URL)
         assert md["date_published"] == "2026-09-01"
 
@@ -210,20 +233,16 @@ class TestSeasonStartDate:
         assert season_start_date("Monsoon", 2026) is None
 ```
 
-  And in `tests/test_functional.py`:
+  And in `tests/test_functional.py`, add `import json`, `import article_assistant` and `from tests.test_extractors import GRAPH_PAGE, URL` to its import block at the top (`sys` and `patch` are already imported there), then append:
 
 ```python
-from unittest.mock import patch
-import json
-import sys
-
-import article_assistant
-from tests.test_extractors import GRAPH_PAGE, URL
-
-
 def test_metadata_json_flag(capsys):
-    with patch.object(article_assistant, "fetch_article_content", return_value=GRAPH_PAGE), \
-         patch.object(sys, "argv", ["article_assistant.py", "metadata", URL, "--json"]):
+    with (
+        patch.object(
+            article_assistant, "fetch_article_content", return_value=GRAPH_PAGE
+        ),
+        patch.object(sys, "argv", ["article_assistant.py", "metadata", URL, "--json"]),
+    ):
         article_assistant.main()
     out = json.loads(capsys.readouterr().out)
     assert out["title"] == "Zoning Alone"
@@ -232,15 +251,19 @@ def test_metadata_json_flag(capsys):
 ```
 
 - [ ] **Step 2: Run them and see them fail.** Run `uv run python -m pytest tests/test_extractors.py tests/test_functional.py -v`. Expected failures:
-  - `ImportError: cannot import name 'season_start_date'`;
-  - after a stub is added, title, date and author assertions fail, because the graph isn't read;
+  - `ImportError: cannot import name '_edition_from_header'` in both files (`test_functional` imports from `test_extractors`);
+  - after stubs are added, title, date and author assertions fail, because the graph isn't read;
   - `--json` is "unrecognized arguments".
 - [ ] **Step 3: Implement.** In `article_assistant.py`, add after `infer_edition_number`:
 
 ```python
-SEASON_START = {"spring": (0, "03-01"), "summer": (0, "06-01"),
-                "fall": (0, "09-01"), "autumn": (0, "09-01"),
-                "winter": (-1, "12-01")}
+SEASON_START = {
+    "spring": (0, "03-01"),
+    "summer": (0, "06-01"),
+    "fall": (0, "09-01"),
+    "autumn": (0, "09-01"),
+    "winter": (-1, "12-01"),
+}
 
 
 def season_start_date(season, year):
@@ -317,22 +340,38 @@ def _has_type(node, wanted):
             metadata["description"] = description
 ```
 
-  Add this helper, next to `_jsonld_nodes`:
+  Add this helper, next to `_jsonld_nodes`. It looks only beside the `h1`'s own block, never with a descendant search from higher up, which on a wide wrapper would take the first `aside` anywhere below, such as a "Related" card for another issue:
 
 ```python
-ISSUE_SLUG_RE = re.compile(r"/issues/no-(\d+)-(winter|spring|summer|fall|autumn)-(\d{4})", re.I)
+ISSUE_SLUG_RE = re.compile(
+    r"/issues/no-(\d+)-(winter|spring|summer|fall|autumn)-(\d{4})", re.I
+)
 
 
 def _edition_from_header(soup):
     """The article's own edition, read from the header aside beside its h1.
+
+    On today's layout the aside sits in the block just before the h1's own
+    block (``div > aside``, then ``div > h1``); it may also be that block's
+    direct neighbour. Only those two places count: a descendant search from
+    higher up would take the first aside anywhere below, such as a "Related"
+    card for another issue.
 
     Returns (number, "Season Year") when the aside links an issue, "none" when
     the aside exists but links no issue (a web-only piece), and None when the
     page has no such header (older layouts), so callers may fall back.
     """
     h1 = soup.find("h1")
-    holder = h1.parent.parent if h1 is not None and h1.parent is not None else None
-    aside = holder.select_one("aside") if holder is not None else None
+    if h1 is None or h1.parent is None:
+        return None
+    holder = h1.parent
+    aside = None
+    for block in (holder.find_previous_sibling(True), holder.find_next_sibling(True)):
+        if block is None:
+            continue
+        aside = block if block.name == "aside" else block.find("aside", recursive=False)
+        if aside is not None:
+            break
     if aside is None:
         return None
     for link in aside.select('a[href*="/issues/"]'):
@@ -367,7 +406,9 @@ def _edition_from_header(soup):
 
 ```python
     metadata_parser.add_argument(
-        "--json", action="store_true", default=False,
+        "--json",
+        action="store_true",
+        default=False,
         help="Print the extracted metadata as one JSON object instead of YAML",
     )
 ```
@@ -470,37 +511,50 @@ exec gosu node /usr/local/bin/agentbox-start.sh
 ### Task 4: agentbox `AGENTBOX_GITHUB=off` leaves GitHub out of the egress allowlist
 
 **Files:**
-- Modify: `image/init-firewall.sh`, the GitHub-ranges block near line 112
+- Modify: `image/init-firewall.sh`: the GitHub-ranges block near line 108, and the post-lockdown verification near line 282, which today probes `https://api.github.com/zen` and dies if it's unreachable
 - Create: `image/tests/test_firewall_github.sh`
 
 **Interfaces:**
-- Produces: the env var `AGENTBOX_GITHUB`, either `on` (the default, today's behaviour) or `off`. With `off`, no request goes to `api.github.com/meta`, and no GitHub ranges are added.
+- Produces: the env var `AGENTBOX_GITHUB`, either `on` (the default, today's behaviour) or `off`. With `off`, no request goes to GitHub at all (neither to `api.github.com/meta` nor from the post-lockdown probe), and no GitHub ranges are added. In both settings the post-lockdown probe targets `api.anthropic.com`, which is in `REQUIRED_DOMAINS` and so always in the allowlist.
 
-- [ ] **Step 1: Write the failing test,** `image/tests/test_firewall_github.sh`. It stubs every external command the script calls, and makes `curl` fail as if GitHub were unreachable:
+- [ ] **Step 1: Write the failing test,** `image/tests/test_firewall_github.sh`. It stubs every external command the script calls (`iptables`, `iptables-save`, `ip6tables`, `ipset`, `ip`, `aggregate`, `jq`, `dig`, `curl`; the rest are coreutils), makes `dig` answer so that the required `api.anthropic.com` resolves, and makes `curl` fail as if GitHub were unreachable:
 
 ```bash
 #!/bin/bash
 source "$(dirname "$0")/lib.sh"
 FW="$(dirname "$0")/../init-firewall.sh"
-for c in iptables ip6tables ipset ip aggregate dig; do stub "$c"; done
-stub curl 7          # GitHub unreachable
-printf '#!/bin/bash\necho "jq $*" >> "%s/calls"\ncat >/dev/null; echo "{}"\n' "$T" > "$T/bin/jq"; chmod +x "$T/bin/jq"
+for c in iptables iptables-save ip6tables ipset ip aggregate jq; do stub "$c"; done
+# dig must answer, or resolving api.anthropic.com (required) aborts the script
+# before it reaches the GitHub logic.
+printf '#!/bin/bash\necho "dig $*" >> "%s/calls"\necho 160.79.104.10\n' "$T" > "$T/bin/dig"; chmod +x "$T/bin/dig"
+curl_stub() {  # curl_stub HOST — curl reaches only HOST; every other URL fails (exit 7)
+  printf '#!/bin/bash\necho "curl $*" >> "%s/calls"\ncase "$*" in *%s*) exit 0;; *) exit 7;; esac\n' "$T" "$1" > "$T/bin/curl"
+  chmod +x "$T/bin/curl"
+}
 printf 'nameserver 127.0.0.11\n' > "$T/resolv.conf"
 sed -e "s#/etc/resolv.conf#$T/resolv.conf#g" "$FW" > "$T/fw.sh"
 
-: > "$T/calls"
+# GitHub off and unreachable, Anthropic reachable: the sandbox starts, and no
+# request goes to GitHub (neither the meta fetch nor the post-lockdown probe).
+curl_stub api.anthropic.com; : > "$T/calls"
 AGENTBOX_NET=restricted AGENTBOX_GITHUB=off PATH="$T/bin:$PATH" bash "$T/fw.sh" >/dev/null 2>&1 \
   || fail "firewall failed with GitHub off and unreachable: $(calls | tail -5)"
-calls | grep -q "^curl .*api.github.com" && fail "fetched GitHub meta despite AGENTBOX_GITHUB=off"
+calls | grep -q "^curl .*api.github.com" && fail "contacted GitHub despite AGENTBOX_GITHUB=off: $(calls | grep '^curl')"
 
+# Default: GitHub unreachable still fails closed.
 : > "$T/calls"
 AGENTBOX_NET=restricted PATH="$T/bin:$PATH" bash "$T/fw.sh" >/dev/null 2>&1 \
   && fail "default should still fail closed when GitHub meta is unreachable"
+
+# GitHub off but nothing reachable after the lockdown: still fails closed.
+stub curl 7; : > "$T/calls"
+AGENTBOX_NET=restricted AGENTBOX_GITHUB=off PATH="$T/bin:$PATH" bash "$T/fw.sh" >/dev/null 2>&1 \
+  && fail "started although the post-lockdown reachability check failed"
 echo "PASS test_firewall_github"
 ```
 
-- [ ] **Step 2: Run it and see it fail.** Run `bash image/tests/test_firewall_github.sh`. Expected: `FAIL: firewall failed with GitHub off and unreachable`. Domain resolution with `dig` stubbed may also need the stub to print an IP. If the first failure is about resolving `api.anthropic.com`, make the `dig` stub print `160.79.104.10`, then rerun until the failure is the GitHub one.
-- [ ] **Step 3: Implement.** Wrap the GitHub block in `init-firewall.sh`, from `log "fetching GitHub IP ranges..."` through `log "GitHub: ${#resolved_ips[@]} ranges"`:
+- [ ] **Step 2: Run it and see it fail.** Run `bash image/tests/test_firewall_github.sh`. Expected: `FAIL: firewall failed with GitHub off and unreachable: curl -s --connect-timeout 10 https://api.github.com/meta`, because today's script fetches GitHub's ranges whatever the variable says. Use the image's bash (4.4 or newer): macOS's `/bin/bash` 3.2 aborts the script partway on its own empty-array expansion under `set -u` (`lan_rules[@]: unbound variable`), so the test can't pass there.
+- [ ] **Step 3: Implement.** Two edits to `init-firewall.sh`. First, wrap the GitHub block, from `log "fetching GitHub IP ranges..."` through `log "GitHub: ${#resolved_ips[@]} ranges"`:
 
 ```bash
 resolved_ips=()
@@ -514,6 +568,15 @@ fi
 ```
 
   The existing `resolved_ips=()` line moves above the `if`, so later code that reads the array still works when it's empty.
+
+  Second, the positive check at the end of the script (after the canary check, which stays as it is) probes `https://api.github.com/zen` and dies if it's unreachable; with GitHub left out of the allowlist that would fail closed on every start. Point it at `api.anthropic.com` instead, which every restricted profile must resolve (`REQUIRED_DOMAINS`) and so is always in the set. No second `AGENTBOX_GITHUB` check here: the probe is the same in both settings.
+
+```bash
+if ! curl --connect-timeout 10 -s https://api.anthropic.com >/dev/null 2>&1; then
+    die "verification failed — https://api.anthropic.com is unreachable"
+fi
+log "verified: api.anthropic.com reachable"
+```
 - [ ] **Step 4: Run both agentbox tests and see them pass.** Run `bash image/tests/test_firewall_github.sh && bash image/tests/test_entrypoint.sh`.
 - [ ] **Step 5: Document it.** Add `AGENTBOX_GITHUB=on` to `env.example`, with the comment "off = no GitHub in the egress allowlist (for agents that never touch git)". Add one line to the README's egress section.
 - [ ] **Step 6: Commit:** "firewall: AGENTBOX_GITHUB=off leaves GitHub out of the allowlist".
@@ -549,5 +612,5 @@ echo "PASS test_uv_pin"
 - [ ] **Step 4: Run all three agentbox tests and see them pass.**
 - [ ] **Step 5: Commit:** "image: install uv from PyPI, pinned and hash-verified (#6)".
 - [ ] **Step 6: Open one PR for Tasks 3–5** from the bot's fork, closing #6. Its description says:
-  - "What breaks if wrong: a sandbox that fails to start (Tasks 3–4), or an image build that fails (Task 5). You'd see it at the next `./deploy.sh` or `agentbox new`. With no arguments and `AGENTBOX_GITHUB` unset, behaviour is unchanged";
+  - "What breaks if wrong: a sandbox that fails to start (Tasks 3–4), or an image build that fails (Task 5). You'd see it at the next `./deploy.sh` or `agentbox new`. With no arguments and `AGENTBOX_GITHUB` unset, behaviour is unchanged, except that the firewall's post-lockdown reachability probe now targets api.anthropic.com instead of api.github.com";
   - "Not verified here: an actual `docker build`. This environment has no Docker, so the first build happens on the VM."
