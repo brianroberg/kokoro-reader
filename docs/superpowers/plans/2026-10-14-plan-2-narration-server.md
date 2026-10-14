@@ -24,9 +24,10 @@ Agent tokens are per work item: the runner's `open` call mints one, and `finish`
 
 - **No name contains a TTS model's name.** The package is `narration`, the launchd label is `net.robergb.narration`, and the env vars are `NARRATION_*`.
 - **The agent never handles a path.** No agent tool takes a file path or a work-item id; the item comes from the caller's token.
-- **At most 4 `record` calls per work item.** The server enforces this and counts the call **before** running the engine, so a crash can't buy extra rounds.
+- **At most 4 `record` calls per work item.** The server enforces this and counts the call **before** running the engine, so a crash can't buy extra rounds. The engine writes to a temp file, which replaces `recording.wav` only when it succeeds: a failed round leaves the previous round's audio in place, and `state["recorded_round"]` says which round's audio that is. `check` and `finish` refuse until the latest round has a recording, so stale audio is never verified or published as a later round.
 - **At most 8 `check` calls per work item.** Each one costs a Gemini call, about 3 cents.
-- **`finish` validates its input and runs the claim checks and the word-preservation check.** A refusal is an error the agent can act on. `finalize` (runner) re-runs the same checks and is authoritative.
+- **`finish` validates its input and runs the claim checks and the word-preservation check.** A refusal is an error the agent can act on. `finalize` (runner) re-runs the same checks and is authoritative. It refuses an item that is still open (no `finish` yet) unless the runner passes `force=True`, which abandons the item: the runner decides when a session has timed out, not the server.
+- **One tool call at a time per work item.** MCP SDK 2.3.0 runs sync tools in worker threads (`anyio.to_thread.run_sync`), so a session that issues two calls at once has both running. The store hands out one lock per item: an agent tool that finds it held is refused with `another call is in progress for this work item; wait for it to finish`, and `finalize` waits for it. So two `record` calls can't both pass the limit, two `check` calls can't share a report number, and the Mac never runs two recordings of one item at once. `tokens.json` is read-modify-written only inside the store, under its own lock, so a runner `open` can't resurrect a token that `finish` is revoking.
 - **Raise the SDK's `ToolError` for every refusal the agent must read** (spike S1, 2026-10-14). In MCP SDK 2.3.0, a plain exception reaches the session only as `"Error executing tool <name>"`, with the message withheld. Only `mcp.server.mcpserver.exceptions.ToolError` passes its text through. `narration.agent_tools.ToolError` stays a plain exception, so the pure modules don't import the SDK, and `app.py` converts it. `app.py` converts the engines' `ValueError` and `RuntimeError` the same way: `verify_audio` refuses a single call over 15 minutes with a `ValueError` whose message says to add `[BREAK]` markers, and the agent must read that remediation, not a bare "Error executing tool check".
 - **Fail fast at startup without `GEMINI_API_KEY`.** With real engines, `python -m narration` exits before it serves if the key is in neither the environment nor `.env`. `--fake-engines` never needs it.
 - **The SDK's HTTP client is `httpx2`, not `httpx`** (S1). Starlette's `TestClient` still needs `httpx`, so both are present, and that's expected.
@@ -441,14 +442,18 @@ def _describe(src, prep, max_items=3, max_words=12):
   - `.path(item_id: str, name: str) -> Path`;
   - `.read_text(item_id, name) -> str` and `.write_text(item_id, name, text) -> None` (atomic);
   - `.load_state(item_id) -> dict` and `.save_state(item_id, state: dict) -> None`;
-  - `.exists(item_id) -> bool`.
+  - `.exists(item_id) -> bool`;
+  - `.lock`, a `threading.RLock` the store holds for every read or write of `tokens.json` and `state.json`, and `.item_lock(item_id) -> threading.Lock`, the one lock per item that the agent tools and `finalize` hold for a whole call (Tasks 4 and 5).
 - Produces: `FILES = {"source.md", "prepared.md", "metadata.json", "state.json", "recording.wav", "episode.mp3", "result.json"}`, plus `report-<n>.txt` for n = 1–8. `.path()` refuses any other name, or an id that isn't 12 lowercase hex characters.
-- Produces: the initial state, `{"status": "open", "records": 0, "checks": [], "finish": None}`.
+- Produces: the initial state, `{"status": "open", "records": 0, "recorded_round": None, "checks": [], "finish": None}`. `records` counts `record` calls; `recorded_round` is the round whose audio is in `recording.wav` (`None` until a round succeeds). `status` goes from `open` to `finished` (the agent's `finish`) to `finalized` (the runner's `finalize`), or from `open` to `abandoned` (`finalize` with `force=True`, after the runner's own timeout). `finalized` and `abandoned` are terminal.
 
 - [ ] **Step 1: Write the failing tests:**
 
 ```python
 import json
+import threading
+import time
+
 import pytest
 
 from narration.workitems import WorkItemStore
@@ -504,6 +509,33 @@ def test_report_names_one_to_eight_allowed(store):
 def test_tokens_file_holds_only_hashes(store, tmp_path):
     _, token = store.open("x", {})
     assert token not in (tmp_path / "tokens.json").read_text()
+
+
+def test_open_cannot_resurrect_a_token_that_is_being_revoked(store, monkeypatch):
+    # The race: open() reads tokens.json, revoke() reads and writes it, then open()
+    # writes its stale copy back, with the revoked hash restored. The store's lock
+    # must make revoke() wait for open() to finish.
+    a, ta = store.open("a", {})
+    real_tokens = store._tokens
+    read = threading.Event()
+
+    def slow_tokens():
+        tokens = real_tokens()
+        if not read.is_set():
+            read.set()
+            time.sleep(0.2)  # open() holds its stale copy while revoke() tries to run
+        return tokens
+
+    monkeypatch.setattr(store, "_tokens", slow_tokens)
+    opened = []
+    t = threading.Thread(target=lambda: opened.append(store.open("b", {})))
+    t.start()
+    assert read.wait(5)
+    store.revoke(a)
+    t.join(5)
+    b, tb = opened[0]
+    assert store.item_for_token(ta) is None
+    assert store.item_for_token(tb) == b
 ```
 
 - [ ] **Step 2: Run them and see them fail.** Run the light test command, with `-k workitems`. Expected: `ModuleNotFoundError`.
@@ -514,6 +546,11 @@ def test_tokens_file_holds_only_hashes(store, tmp_path):
 
 The agent never names a path or an item: it holds a per-item token, which
 this store maps to an item id. Only token hashes are written to disk.
+
+One process serves every item, and the MCP SDK runs sync tools in worker
+threads, so two calls can overlap. Two kinds of lock keep that safe: `lock`
+(store-wide) for tokens.json and state.json, and one lock per item that a
+tool holds for a whole call.
 """
 from __future__ import annotations
 
@@ -523,13 +560,16 @@ import os
 import re
 import secrets
 import tempfile
+import threading
 from pathlib import Path
 
 ID_RE = re.compile(r"^[0-9a-f]{12}$")
 REPORT_RE = re.compile(r"^report-[1-8]\.txt$")
 FILES = {"source.md", "prepared.md", "metadata.json", "state.json",
          "recording.wav", "episode.mp3", "result.json"}
-INITIAL_STATE = {"status": "open", "records": 0, "checks": [], "finish": None}
+# status: open -> finished (finish) -> finalized (finalize); open -> abandoned (finalize, force=True).
+# records: record calls so far. recorded_round: the round whose audio is in recording.wav.
+INITIAL_STATE = {"status": "open", "records": 0, "recorded_round": None, "checks": [], "finish": None}
 
 
 def _hash(token: str) -> str:
@@ -553,8 +593,16 @@ class WorkItemStore:
     def __init__(self, root: Path):
         self.root = Path(root)
         (self.root / "items").mkdir(parents=True, exist_ok=True)
+        self.lock = threading.RLock()  # held for every read or write of tokens.json and state.json
+        self._item_locks: dict[str, threading.Lock] = {}
 
-    # -- tokens --
+    def item_lock(self, item_id: str) -> threading.Lock:
+        """The item's lock. An agent tool holds it for one call and refuses if it's
+        taken; finalize waits for it. So one call at a time works on an item."""
+        with self.lock:
+            return self._item_locks.setdefault(item_id, threading.Lock())
+
+    # -- tokens: read-modify-written only here, under the store lock --
     def _tokens(self) -> dict:
         p = self.root / "tokens.json"
         return json.loads(p.read_text()) if p.exists() else {}
@@ -565,11 +613,13 @@ class WorkItemStore:
     def item_for_token(self, token: str):
         if not token:
             return None
-        return self._tokens().get(_hash(token))
+        with self.lock:
+            return self._tokens().get(_hash(token))
 
     def revoke(self, item_id: str) -> None:
-        tokens = {h: i for h, i in self._tokens().items() if i != item_id}
-        self._save_tokens(tokens)
+        with self.lock:
+            tokens = {h: i for h, i in self._tokens().items() if i != item_id}
+            self._save_tokens(tokens)
 
     # -- items --
     def open(self, article_text: str, metadata: dict):
@@ -579,9 +629,10 @@ class WorkItemStore:
         self.write_text(item_id, "prepared.md", article_text)
         self.write_text(item_id, "metadata.json", json.dumps(metadata))
         self.save_state(item_id, dict(INITIAL_STATE))
-        tokens = self._tokens()
-        tokens[_hash(token)] = item_id
-        self._save_tokens(tokens)
+        with self.lock:
+            tokens = self._tokens()
+            tokens[_hash(token)] = item_id
+            self._save_tokens(tokens)
         return item_id, token
 
     def exists(self, item_id: str) -> bool:
@@ -601,10 +652,12 @@ class WorkItemStore:
         _atomic_write(self.path(item_id, name), text.encode("utf-8"))
 
     def load_state(self, item_id: str) -> dict:
-        return json.loads(self.read_text(item_id, "state.json"))
+        with self.lock:
+            return json.loads(self.read_text(item_id, "state.json"))
 
     def save_state(self, item_id: str, state: dict) -> None:
-        self.write_text(item_id, "state.json", json.dumps(state))
+        with self.lock:
+            self.write_text(item_id, "state.json", json.dumps(state))
 ```
 
 - [ ] **Step 4: Run them and see them pass.** Run the light test command, with `-k workitems`.
@@ -629,6 +682,8 @@ class WorkItemStore:
   - `Converter.to_mp3(wav: Path, mp3: Path, title: str, artist: str, album: str) -> None`.
 - Produces: the real adapters `KokoroEngine`, `GeminiVerifier`, `MisakiG2P` and `Mp3Converter`, and the fakes `FakeTTS`, `FakeVerifier`, `FakeG2P` and `FakeConverter`.
 - Produces: `ToolError(Exception)`; `MAX_RECORDS = 4`; `MAX_CHECKS = 8`.
+- Every `AgentTools` method holds the item's lock (`store.item_lock`) for the whole call, and refuses with `ToolError` if another call holds it. `record` runs the engine on a temp path in the item's folder and moves the file to `recording.wav` only on success, then sets `state["recorded_round"]`; `check` and `finish` refuse while `recorded_round` lags `records`.
+- `FakeTTS` has `calls`, `fail_next` (the next run writes a partial file, then raises) and `hold` (a `(started, release)` pair of `threading.Event`s; when set, a run blocks between them, for the concurrency tests).
 - Produces: `AgentTools(store, tts, verifier, g2p, default_voice="af_heart")`, with these methods, each taking `item_id: str` first:
   - `get_text() -> dict`;
   - `replace_text(old, new) -> dict`;
@@ -644,6 +699,8 @@ class WorkItemStore:
 - [ ] **Step 1: Write the failing tests:**
 
 ```python
+import threading
+
 import pytest
 from hypothesis import given, settings, strategies as st
 
@@ -699,6 +756,54 @@ def test_record_counts_even_when_the_engine_fails(env):
     with pytest.raises(Exception):
         tools.record(item)
     assert store.load_state(item)["records"] == 1
+
+
+def test_a_failed_record_keeps_the_previous_audio_and_blocks_check_and_finish(env):
+    store, tools, tts, _, item, _ = env
+    tools.record(item); tools.check(item)
+    wav = store.path(item, "recording.wav")
+    round_one = wav.read_bytes()
+    tts.fail_next = True
+    with pytest.raises(Exception):
+        tools.record(item)  # round 2 is counted, but produced nothing
+    state = store.load_state(item)
+    assert (state["records"], state["recorded_round"]) == (2, 1)
+    assert wav.read_bytes() == round_one  # round 1's audio, untouched
+    assert not list(wav.parent.glob(".tmp-*"))  # and the partial file is gone
+    with pytest.raises(ToolError, match="record again"):
+        tools.check(item)  # must not verify round 1's audio as round 2's
+    with pytest.raises(ToolError, match="record again"):
+        tools.finish(item, "clean", [], [])
+    tools.record(item)
+    assert store.load_state(item)["recorded_round"] == 3
+
+
+def test_a_second_call_while_one_runs_is_refused(env):
+    store, tools, tts, _, item, _ = env
+    for _ in range(MAX_RECORDS - 1):
+        tools.record(item)
+    started, release = threading.Event(), threading.Event()
+    tts.hold = (started, release)  # the next run blocks until the test releases it
+    results = []
+
+    def call():
+        try:
+            results.append(tools.record(item))
+        except ToolError as e:
+            results.append(e)
+
+    first = threading.Thread(target=call)
+    first.start()
+    assert started.wait(5)  # round 4 is inside the engine
+    with pytest.raises(ToolError, match="in progress"):
+        tools.record(item)  # the parallel call is refused, not queued
+    release.set()
+    first.join(5)
+    tts.hold = None
+    assert isinstance(results[0], dict) and results[0]["round"] == MAX_RECORDS
+    assert tts.calls == MAX_RECORDS
+    with pytest.raises(ToolError, match="limit"):
+        tools.record(item)
 
 
 def test_record_rejects_odd_voices_and_speeds(env):
@@ -911,12 +1016,18 @@ class FakeTTS:
     def __init__(self):
         self.calls = 0
         self.fail_next = False
+        self.hold = None  # (started, release) Events: when set, a run blocks between them
 
     def record(self, text, out_path, voice, speed):
         self.calls += 1
         if self.fail_next:
             self.fail_next = False
+            Path(out_path).write_bytes(b"RIFF partial")  # a crash mid-write
             raise RuntimeError("fake engine failure")
+        if self.hold:
+            started, release = self.hold
+            started.set()
+            release.wait()
         Path(out_path).write_bytes(b"RIFF fake wav")
         return 60.0
 
@@ -948,10 +1059,16 @@ class FakeConverter:
 
 ```python
 """The six tools an agent session has. Plain functions over a work item;
-the HTTP layer resolves the item from the caller's token (agent never names it)."""
+the HTTP layer resolves the item from the caller's token (agent never names it).
+
+Every tool holds its item's lock for the whole call. The SDK runs sync tools in
+worker threads, and two parallel record calls at round 3 would otherwise both
+pass the limit. A call that finds the lock held is refused, not queued."""
 from __future__ import annotations
 
+import functools
 import json
+import os
 import re
 
 from narration.words import Substitution, check as words_check
@@ -975,6 +1092,20 @@ def _short(value, field):
     return value
 
 
+def _locked(method):
+    """Run a tool method under its item's lock; refuse if another call holds it."""
+    @functools.wraps(method)
+    def wrapper(self, item_id, *args, **kwargs):
+        lock = self.store.item_lock(item_id)
+        if not lock.acquire(blocking=False):
+            raise ToolError("another call is in progress for this work item; wait for it to finish")
+        try:
+            return method(self, item_id, *args, **kwargs)
+        finally:
+            lock.release()
+    return wrapper
+
+
 class AgentTools:
     def __init__(self, store, tts, verifier, g2p, default_voice="af_heart"):
         self.store, self.tts, self.verifier, self.g2p = store, tts, verifier, g2p
@@ -986,12 +1117,14 @@ class AgentTools:
             raise ToolError("this work item is finished; no further tool calls are accepted")
         return state
 
+    @_locked
     def get_text(self, item_id):
         state = self._open_state(item_id)
         return {"prepared_text": self.store.read_text(item_id, "prepared.md"),
                 "metadata": json.loads(self.store.read_text(item_id, "metadata.json")),
                 "records_used": state["records"], "records_left": MAX_RECORDS - state["records"]}
 
+    @_locked
     def replace_text(self, item_id, old, new):
         self._open_state(item_id)
         if not old:
@@ -1005,6 +1138,7 @@ class AgentTools:
         self.store.write_text(item_id, "prepared.md", text.replace(old, new, 1))
         return {"ok": True}
 
+    @_locked
     def record(self, item_id, voice=None, speed=1.0):
         state = self._open_state(item_id)
         voice = voice or self.default_voice
@@ -1018,14 +1152,25 @@ class AgentTools:
         state["records"] += 1  # counted before the engine runs
         self.store.save_state(item_id, state)
         text = self.store.read_text(item_id, "prepared.md")
-        duration = self.tts.record(text, self.store.path(item_id, "recording.wav"), voice, float(speed))
+        final = self.store.path(item_id, "recording.wav")
+        tmp = final.with_name(".tmp-recording.wav")
+        try:
+            duration = self.tts.record(text, tmp, voice, float(speed))
+            os.replace(tmp, final)  # the previous round's audio stays until this one succeeds
+        finally:
+            tmp.unlink(missing_ok=True)  # a failed run's partial file
+        state["recorded_round"] = state["records"]
+        self.store.save_state(item_id, state)
         return {"round": state["records"], "duration_seconds": round(duration, 1),
                 "records_left": MAX_RECORDS - state["records"]}
 
+    @_locked
     def check(self, item_id):
         state = self._open_state(item_id)
-        if state["records"] == 0 or not self.store.path(item_id, "recording.wav").exists():
+        if state["records"] == 0:
             raise ToolError("nothing to check yet: call record first")
+        if state["recorded_round"] != state["records"] or not self.store.path(item_id, "recording.wav").exists():
+            raise ToolError(f"record round {state['records']} failed and left no recording; call record again")
         if len(state["checks"]) >= MAX_CHECKS:
             raise ToolError(f"check limit reached ({MAX_CHECKS} per article)")
         text = self.store.read_text(item_id, "prepared.md")
@@ -1036,12 +1181,14 @@ class AgentTools:
         self.store.save_state(item_id, state)
         return {"report": report, "precheck_warnings": list(warnings)}
 
+    @_locked
     def phonemes(self, item_id, word):
         self._open_state(item_id)
         if not isinstance(word, str) or not 0 < len(word) <= 64:
             raise ToolError("word must be 1-64 characters")
         return {"word": word, "phonemes": self.g2p.phonemes(word)}
 
+    @_locked
     def finish(self, item_id, outcome, remaining_issues, substitutions):
         state = self._open_state(item_id)
         if outcome not in OUTCOMES:
@@ -1053,6 +1200,9 @@ class AgentTools:
         subs_in = [{"original": _short(s.get("original"), "original"),
                     "spoken": _short(s.get("spoken"), "spoken"),
                     "why": _short(s.get("why", ""), "why")} for s in substitutions]
+        if state["records"] and state["recorded_round"] != state["records"]:
+            raise ToolError(f"record round {state['records']} failed and left no recording; "
+                            "call record again, then check, before finish")
         latest = [c for c in state["checks"] if c["record"] == state["records"]]
         if state["records"] == 0 or not latest:
             raise ToolError("call check on the latest recording before finish")
@@ -1087,12 +1237,12 @@ class AgentTools:
 - Test: `tests/narration/test_gate.py`
 
 **Interfaces:**
-- Consumes: `WorkItemStore`, `words.check`, `Converter`.
+- Consumes: `WorkItemStore`, `words.check`, `Converter`, `ToolError` (Task 4).
 - Produces: `GateResult(action: str, outcome: str | None, reasons: list[str], notes: str)`, where `action` is `"publish"`, `"hold"` or `"retry"`.
 - Produces: `evaluate(state: dict, source: str, prepared: str, metadata: dict) -> GateResult`.
 - Produces: `RunnerTools(store, converter)`, with:
   - `.open(article_text: str, metadata: dict) -> dict`, returning `{"item_id", "agent_token"}`;
-  - `.finalize(item_id: str) -> dict`, returning `{"action", "outcome", "reasons", "notes", "mp3": bool}`;
+  - `.finalize(item_id: str, force: bool = False) -> dict`, returning `{"action", "outcome", "reasons", "notes", "mp3": bool}`. It waits for the item's lock, so it can't interleave with a running `record`. An item that is still `open` is refused with `ToolError` unless `force=True`, which revokes the token, sets the status to `abandoned` and returns `action: "retry"`; the runner passes `force=True` only after its own session timeout (Plan 3);
   - `.status(item_id: str) -> dict`.
 - **Metadata keys** come from article-assistant's `--json` output (Plan 1, Task 2): `title`, `authors`, `publication`, `issue_number`, `issue_season`, `date_published`, `description`.
 - **MP3 tags:**
@@ -1103,9 +1253,11 @@ class AgentTools:
 - [ ] **Step 1: Write the failing tests:**
 
 ```python
+import threading
+
 import pytest
 
-from narration.agent_tools import AgentTools
+from narration.agent_tools import AgentTools, ToolError
 from narration.fakes import FakeConverter, FakeG2P, FakeTTS, FakeVerifier
 from narration.gate import evaluate
 from narration.runner_tools import RunnerTools
@@ -1132,11 +1284,34 @@ def test_open_returns_id_and_token(env):
     assert store.item_for_token(token) == item
 
 
-def test_no_finish_means_retry(env):
-    store, runner, _, conv, item, _ = env
-    out = runner.finalize(item)
+def test_finalize_refuses_an_open_item_unless_forced(env):
+    store, runner, _, conv, item, token = env
+    with pytest.raises(ToolError, match="still open"):
+        runner.finalize(item)
+    assert store.item_for_token(token) == item  # the session can still finish
+    out = runner.finalize(item, force=True)  # the runner's timeout policy decided
     assert out["action"] == "retry" and not out["mp3"] and conv.calls == []
-    assert store.item_for_token(env[5]) is None  # token revoked at finalize too
+    assert store.item_for_token(token) is None  # abandoned: the token dies here
+    assert runner.status(item)["status"] == "abandoned"
+    assert runner.finalize(item)["action"] == "retry"  # terminal; no force needed now
+
+
+def test_finalize_waits_for_a_running_record(env):
+    store, runner, tools, _, item, _ = env
+    started, release = threading.Event(), threading.Event()
+    tools.tts.hold = (started, release)
+    recorder = threading.Thread(target=tools.record, args=(item,))
+    recorder.start()
+    assert started.wait(5)  # round 1 is inside the engine
+    out = []
+    finalizer = threading.Thread(target=lambda: out.append(runner.finalize(item, force=True)))
+    finalizer.start()
+    finalizer.join(0.2)
+    assert finalizer.is_alive()  # blocked behind the record, not interleaved with it
+    release.set()
+    recorder.join(5); finalizer.join(5)
+    assert out[0]["action"] == "retry"
+    assert store.load_state(item)["recorded_round"] == 1  # the record's state write landed
 
 
 def test_clean_publishes_with_tags_and_notes(env):
@@ -1173,6 +1348,14 @@ def test_gate_rechecks_words_independently(env):
     store.write_text(item, "prepared.md", ARTICLE + " Buy now.")  # tampering after finish
     out = runner.finalize(item)
     assert out["action"] == "hold" and any("buy" in r for r in out["reasons"])
+
+
+def test_evaluate_holds_when_the_latest_round_has_no_recording():
+    state = {"status": "finished", "records": 2, "recorded_round": 1,
+             "checks": [{"n": 1, "record": 1, "warnings": []}],
+             "finish": {"outcome": "clean", "remaining_issues": [], "substitutions": []}}
+    out = evaluate(state, ARTICLE, ARTICLE, META)
+    assert out.action == "hold" and any("no recording" in r for r in out.reasons)
 
 
 def test_finalize_twice_does_not_convert_twice(env):
@@ -1239,7 +1422,9 @@ def evaluate(state: dict, source: str, prepared: str, metadata: dict) -> GateRes
     subs = [Substitution(s["original"], s["spoken"]) for s in finish.get("substitutions", [])]
     reasons += words_check(source, prepared, subs)
     latest = [c for c in state.get("checks", []) if c["record"] == state.get("records")]
-    if not latest:
+    if state.get("recorded_round") != state.get("records"):
+        reasons.append("the latest record round left no recording")
+    elif not latest:
         reasons.append("no check ran on the latest recording")
     elif finish["outcome"] in ("clean", "minor") and latest[-1]["warnings"]:
         reasons.append("pre-check warnings on the latest recording: " + "; ".join(latest[-1]["warnings"]))
@@ -1255,6 +1440,7 @@ from __future__ import annotations
 
 import json
 
+from narration.agent_tools import ToolError
 from narration.gate import album_for, evaluate
 
 
@@ -1274,26 +1460,33 @@ class RunnerTools:
                 "checks": len(state["checks"]), "finish": state["finish"],
                 "mp3": self.store.path(item_id, "episode.mp3").exists()}
 
-    def finalize(self, item_id: str) -> dict:
-        state = self.store.load_state(item_id)
-        self.store.revoke(item_id)
-        meta = json.loads(self.store.read_text(item_id, "metadata.json"))
-        result = evaluate(state, self.store.read_text(item_id, "source.md"),
-                          self.store.read_text(item_id, "prepared.md"), meta)
-        mp3 = self.store.path(item_id, "episode.mp3")
-        if result.action == "publish" and not mp3.exists():
-            self.converter.to_mp3(self.store.path(item_id, "recording.wav"), mp3,
-                                  title=meta.get("title", ""),
-                                  artist="; ".join(meta.get("authors", [])),
-                                  album=album_for(meta))
-        if state["status"] != "finalized":
-            state["status"] = "finalized"
-            self.store.save_state(item_id, state)
-        return {"action": result.action, "outcome": result.outcome, "reasons": result.reasons,
-                "notes": result.notes, "mp3": mp3.exists()}
+    def finalize(self, item_id: str, force: bool = False) -> dict:
+        with self.store.item_lock(item_id):  # wait for a running record, check or finish
+            state = self.store.load_state(item_id)
+            if state["status"] == "open":
+                if not force:
+                    raise ToolError("this work item is still open: the session has not called finish. "
+                                    "Pass force=True to abandon it, once the runner's own timeout has passed.")
+                state["status"] = "abandoned"  # terminal; the gate below answers retry
+                self.store.save_state(item_id, state)
+            self.store.revoke(item_id)
+            meta = json.loads(self.store.read_text(item_id, "metadata.json"))
+            result = evaluate(state, self.store.read_text(item_id, "source.md"),
+                              self.store.read_text(item_id, "prepared.md"), meta)
+            mp3 = self.store.path(item_id, "episode.mp3")
+            if result.action == "publish" and not mp3.exists():
+                self.converter.to_mp3(self.store.path(item_id, "recording.wav"), mp3,
+                                      title=meta.get("title", ""),
+                                      artist="; ".join(meta.get("authors", [])),
+                                      album=album_for(meta))
+            if state["status"] == "finished":
+                state["status"] = "finalized"
+                self.store.save_state(item_id, state)
+            return {"action": result.action, "outcome": result.outcome, "reasons": result.reasons,
+                    "notes": result.notes, "mp3": mp3.exists()}
 ```
 
-  Note on `evaluate`: `finalize` is idempotent. A second call recomputes the same result and skips conversion because the MP3 exists. The record of what was published is the runner's (Plan 3).
+  Note on `evaluate`: `finalize` is idempotent. A second call recomputes the same result and skips conversion because the MP3 exists. An `abandoned` item stays `abandoned`, and every later `finalize` answers `retry` without `force`. The server never decides that a session has timed out: only the runner knows its session's deadline, so only it may force. The record of what was published is the runner's (Plan 3).
 - [ ] **Step 4: Run them and see them pass.** Run the light test command, with `-k gate`.
 - [ ] **Step 5: Commit:** "narration: the pre-publish gate and the runner tools".
 
@@ -1535,6 +1728,18 @@ def test_engine_errors_reach_the_agent_with_their_message(tmp_path):
     assert "Add [BREAK] markers" in result["content"][0]["text"]
 
 
+def test_a_premature_finalize_is_refused_with_its_reason(client):
+    c, store = client
+    item, token = store.open("x", {})
+    body = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "finalize", "arguments": {"item_id": item}}}
+    r = c.post("/runner/mcp", json=body, headers={
+        "Accept": "application/json, text/event-stream", "Content-Type": "application/json",
+        "Authorization": f"Bearer {RUNNER}"}).json()["result"]
+    assert r["isError"] is True and "still open" in r["content"][0]["text"]
+    assert store.item_for_token(token) == item  # nothing was revoked
+
+
 def test_real_engines_need_a_gemini_key_at_startup(tmp_path, monkeypatch):
     from narration.__main__ import main
     (tmp_path / "runner-token").write_text("runner-secret\n")
@@ -1577,7 +1782,8 @@ AGENT_INSTRUCTIONS = (
     "Tools for recording one article. Start with get_text. Edit the prepared text only "
     "with replace_text, and never change what the article says: declare every word "
     "change as a substitution in finish. Record, then check, at most four rounds. End "
-    "with finish."
+    "with finish. Call one tool at a time: a call made while another is still running "
+    "is refused."
 )
 
 
@@ -1656,15 +1862,18 @@ def build_app(store, agent_tools, runner_tools, runner_token, allowed_hosts):
         return runner_tools.open(article_text, metadata)
 
     @runner.tool()
-    def finalize(item_id: str) -> dict:
-        """Run the gate; on publish, make the MP3. Idempotent."""
+    def finalize(item_id: str, force: bool = False) -> dict:
+        """Run the gate on a finished item; on publish, make the MP3. Idempotent.
+        An item that is still open (no finish yet) is refused: pass force=True only
+        once the runner's own session timeout has passed. That revokes the agent's
+        token, marks the item 'abandoned' and returns action 'retry'."""
         if not store.exists(item_id):
             raise SDKToolError("no such work item")
-        return runner_tools.finalize(item_id)
+        return run(runner_tools.finalize, item_id, force)
 
     @runner.tool()
     def status(item_id: str) -> dict:
-        """A work item's state."""
+        """A work item's state. status is open, finished, finalized or abandoned."""
         return runner_tools.status(item_id)
 
     agent_app = agent.streamable_http_app(streamable_http_path="/mcp", stateless_http=True,
