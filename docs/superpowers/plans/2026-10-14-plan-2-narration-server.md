@@ -5,7 +5,7 @@
 **Goal:** The `narration` MCP server. It runs on the Mac, owns every article's work folder, and gives an agent session exactly six tools. It gives the runner its own tools and a download route, and it decides with deterministic code whether a recording may be published.
 
 **Architecture:** A new package `narration/` in kokoro-reader:
-- **Pure logic, testable anywhere with fakes:** word preservation, work items, the agent tools, and the gate.
+- **Pure logic, testable anywhere with fakes:** word preservation (it borrows `clean_markdown_text` from `text_to_speech.py`, so it sees exactly what the engine will speak), work items, the agent tools, and the gate.
 - **Thin adapters** over the existing `text_to_speech.py`, `verify_audio.py`, `convert_audio.py` and misaki.
 - **One Starlette app** that mounts two MCP 2.x servers (`/agent/mcp`, `/runner/mcp`) behind a bearer-token middleware.
 
@@ -27,7 +27,8 @@ Agent tokens are per work item: the runner's `open` call mints one, and `finish`
 - **At most 4 `record` calls per work item.** The server enforces this and counts the call **before** running the engine, so a crash can't buy extra rounds.
 - **At most 8 `check` calls per work item.** Each one costs a Gemini call, about 3 cents.
 - **`finish` validates its input and runs the claim checks and the word-preservation check.** A refusal is an error the agent can act on. `finalize` (runner) re-runs the same checks and is authoritative.
-- **Raise the SDK's `ToolError` for every refusal the agent must read** (spike S1, 2026-10-14). In MCP SDK 2.3.0, a plain exception reaches the session only as `"Error executing tool <name>"`, with the message withheld. Only `mcp.server.mcpserver.exceptions.ToolError` passes its text through. `narration.agent_tools.ToolError` stays a plain exception, so the pure modules don't import the SDK, and `app.py` converts it.
+- **Raise the SDK's `ToolError` for every refusal the agent must read** (spike S1, 2026-10-14). In MCP SDK 2.3.0, a plain exception reaches the session only as `"Error executing tool <name>"`, with the message withheld. Only `mcp.server.mcpserver.exceptions.ToolError` passes its text through. `narration.agent_tools.ToolError` stays a plain exception, so the pure modules don't import the SDK, and `app.py` converts it. `app.py` converts the engines' `ValueError` and `RuntimeError` the same way: `verify_audio` refuses a single call over 15 minutes with a `ValueError` whose message says to add `[BREAK]` markers, and the agent must read that remediation, not a bare "Error executing tool check".
+- **Fail fast at startup without `GEMINI_API_KEY`.** With real engines, `python -m narration` exits before it serves if the key is in neither the environment nor `.env`. `--fake-engines` never needs it.
 - **The SDK's HTTP client is `httpx2`, not `httpx`** (S1). Starlette's `TestClient` still needs `httpx`, so both are present, and that's expected.
 - **Keep the CLIs working.** `text_to_speech.py`, `verify_audio.py` and `convert_audio.py` stay independently callable (ADR-001).
 - **Red/green TDD,** and commit each step separately.
@@ -39,7 +40,7 @@ Agent tokens are per work item: the runner's `open` call mints one, and `finish`
     python -m pytest tests/narration tests/test_verify_audio.py -q
   ```
 
-  This works in Linux containers, where `uv sync` of the full project would pull in torch and CUDA. Call this the **light test command** below.
+  This works in Linux containers, where `uv sync` of the full project would pull in torch and CUDA. Call this the **light test command** below. It includes numpy, soundfile and pydub because `verify_audio.py` and `narration/words.py` import `text_to_speech.py`, whose `mlx_audio` import is guarded.
 
 ## Review Focus
 
@@ -56,7 +57,7 @@ Agent tokens are per work item: the runner's `open` call mints one, and `finish`
 **Files:**
 - Modify: `pyproject.toml` (deps), `uv.lock` (regenerated with `uv lock`)
 - Modify: `verify_audio.py` (extract `precheck_warnings`, and make `precheck_report` use it)
-- Create: `narration/__init__.py` (empty), `tests/narration/__init__.py` (empty)
+- Create: `narration/__init__.py`, `tests/__init__.py`, `tests/narration/__init__.py` (all empty)
 - Test: `tests/test_verify_audio.py`
 
 **Interfaces:**
@@ -126,7 +127,9 @@ def precheck_report(audio: AudioSegment, source_text: str) -> str:
   - add `"mcp==2.3.0"` and `"uvicorn>=0.30"` to `dependencies`;
   - add `"hypothesis"` and `"httpx"` to the `dev` group.
 
-  Then run `uv lock`, which resolves only and installs nothing. Create the empty `narration/__init__.py` and `tests/narration/__init__.py`.
+  Then run `uv lock`, which resolves only and installs nothing. Create the empty `narration/__init__.py`, `tests/__init__.py` and `tests/narration/__init__.py`.
+
+  `tests/__init__.py` is not optional. `tests/` has no `__init__.py` today, and in pytest's default import mode a `tests/narration/__init__.py` alone makes `tests/` the package root, so the test modules import as `narration.test_*` and that `narration` shadows the real package: every Plan 2 test then dies at collection with `ModuleNotFoundError: No module named 'narration.words'`. With `tests/__init__.py` they import as `tests.narration.test_*`. The existing tests collect and pass unchanged with it (checked 2026-10-14).
 - [ ] **Step 6: Commit as two commits:**
   - "verify_audio: expose precheck_warnings";
   - "narration: package skeleton and MCP dependencies".
@@ -142,7 +145,7 @@ def precheck_report(audio: AudioSegment, source_text: str) -> str:
 **Interfaces:**
 - Produces:
   - `Substitution(original: str, spoken: str)`, a frozen dataclass;
-  - `words(text: str) -> list[str]`;
+  - `words(text: str) -> list[str]`: the words the engine will speak, case-folded. It runs `text_to_speech.clean_markdown_text` first, the same cleaning the CLI and `KokoroEngine` (Task 4) apply before generating audio, then drops `[BREAK]` markers and reduces phonetic overrides to their word;
   - `check(source: str, prepared: str, substitutions: list[Substitution]) -> list[str]`, which returns problems; an empty list means it passes;
   - `MAX_SUBSTITUTIONS = 25`, `MAX_SPOKEN_WORDS = 6`, `MAX_EXTRA_WORDS = 3`.
 
@@ -197,6 +200,15 @@ def test_too_many_substitutions():
 
 def test_words_normalises_quotes_case_and_breaks():
     assert words("It’s [BREAK] THE end") == ["it's", "the", "end"]
+
+
+def test_heading_markers_and_link_urls_are_not_words():
+    # The CLI speaks a heading's text and a link's text, never the '#' or the
+    # URL, and KokoroEngine (Task 4) applies the same cleaning. words() must agree.
+    article = "# Zoning Alone\n\nSee the [court](https://example.com/zoning) **today**."
+    assert words(article) == ["zoning", "alone", "see", "the", "court", "today"]
+    prepared = "Zoning Alone\n\n[BREAK]\n\nSee the court today."
+    assert check(article, prepared, []) == []
 
 
 # ---- properties ----
@@ -286,8 +298,11 @@ def test_property_any_undeclared_word_change_fails(data, paras):
 
 The prepared text must say exactly what the article says. Formatting,
 paragraph breaks, pauses, [BREAK] markers and phonetic overrides are invisible
-here. Every change to the words themselves must be declared as a Substitution,
-and declared substitutions are bounded so they can't carry new content.
+here. Markdown is stripped by text_to_speech.clean_markdown_text, the same
+function the CLI and KokoroEngine run before generating audio, so this check
+sees exactly the words that will be spoken. Every change to the words
+themselves must be declared as a Substitution, and declared substitutions are
+bounded so they can't carry new content.
 """
 from __future__ import annotations
 
@@ -296,15 +311,14 @@ import re
 import unicodedata
 from dataclasses import dataclass
 
+from text_to_speech import clean_markdown_text
+
 MAX_SUBSTITUTIONS = 25
 MAX_SPOKEN_WORDS = 6
 MAX_EXTRA_WORDS = 3
 _MAX_STATES_FACTOR = 50
 
-_CODE_BLOCK = re.compile(r"```.*?```", re.S)
-_IMAGE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
 _PHONETIC = re.compile(r"\[([^\]]+)\]\(/[^)]*/\)")
-_LINK = re.compile(r"\[([^\]]+)\]\([^)]*\)")
 _TOKEN = re.compile(r"[^\W_]+(?:'[^\W_]+)*")
 
 
@@ -315,13 +329,17 @@ class Substitution:
 
 
 def words(text: str) -> list[str]:
-    """The text's words, case-folded, with markup, pauses and overrides removed."""
-    t = unicodedata.normalize("NFKC", text).replace("’", "'").replace("‘", "'")
+    """The words the engine will speak, case-folded.
+
+    clean_markdown_text drops heading markers, emphasis markers, images and
+    link URLs (keeping link text and phonetic overrides), exactly as the CLI
+    does for a .md file. prepare_for_tts only rewrites punctuation, so it
+    changes no words and isn't needed here.
+    """
+    t = clean_markdown_text(text)
+    t = unicodedata.normalize("NFKC", t).replace("’", "'").replace("‘", "'")
     t = t.replace("[BREAK]", " ")
-    t = _CODE_BLOCK.sub(" ", t)
-    t = _IMAGE.sub(" ", t)
     t = _PHONETIC.sub(r"\1", t)
-    t = _LINK.sub(r"\1", t)
     return [w.casefold() for w in _TOKEN.findall(t)]
 
 
@@ -600,10 +618,10 @@ class WorkItemStore:
 - Create: `narration/engines.py` (Protocols plus real adapters, with imports inside the methods)
 - Create: `narration/fakes.py` (fake engines for tests and for `--fake-engines`)
 - Create: `narration/agent_tools.py`
-- Test: `tests/narration/test_agent_tools.py`
+- Test: `tests/narration/test_agent_tools.py`, `tests/narration/test_engines.py`
 
 **Interfaces:**
-- Consumes: `WorkItemStore` (Task 3); `words.check` and `Substitution` (Task 2); `verify_audio.precheck_warnings` (Task 1), used by the real verifier only.
+- Consumes: `WorkItemStore` (Task 3); `words.check` and `Substitution` (Task 2); `verify_audio.precheck_warnings` (Task 1), used by the real verifier only; `text_to_speech.clean_markdown_text` and `generate_audio`, used by `KokoroEngine` only.
 - Produces: the Protocols
   - `TTSEngine.record(text: str, out_path: Path, voice: str, speed: float) -> float` (seconds);
   - `Verifier.check(audio_path: Path, text: str) -> tuple[str, list[str]]` (the report, then the pre-check warnings);
@@ -782,7 +800,36 @@ def test_property_engine_runs_at_most_max_records(tmp_path_factory, calls):
     assert tts.calls == min(calls, MAX_RECORDS)
 ```
 
-- [ ] **Step 2: Run them and see them fail.** Run the light test command, with `-k agent_tools`. Expected: `ModuleNotFoundError`.
+  And `tests/narration/test_engines.py`, for the one adapter whose input can be checked without the model. `KokoroEngine.record` imports `generate_audio` from `text_to_speech` at call time, so patching the module attribute is enough:
+
+```python
+import numpy as np
+import pytest
+import soundfile as sf
+
+import text_to_speech
+from narration.engines import KokoroEngine
+
+
+def test_kokoro_engine_cleans_markdown_like_the_cli(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_generate_audio(text, output_path, voice="af_heart", speed=1.0, **_):
+        seen.update(text=text, voice=voice, speed=speed)
+        sf.write(output_path, np.zeros(2400, dtype="float32"), 24000)  # 0.1 s of silence
+
+    monkeypatch.setattr(text_to_speech, "generate_audio", fake_generate_audio)
+    out = tmp_path / "recording.wav"
+    seconds = KokoroEngine().record(
+        "# Zoning Alone\n\nSee the [court](https://example.com/zoning) **today**, "
+        "said [Pengelley](/pɛnʤˈɛli/).", out, "af_heart", 1.0)
+    # The heading marker, the URL and the emphasis are gone; the phonetic override stays.
+    assert seen["text"] == "Zoning Alone\n\nSee the court today, said [Pengelley](/pɛnʤˈɛli/)."
+    assert (seen["voice"], seen["speed"]) == ("af_heart", 1.0)
+    assert seconds == pytest.approx(0.1, abs=0.01)
+```
+
+- [ ] **Step 2: Run them and see them fail.** Run the light test command, with `-k "agent_tools or engines"`. Expected: `ModuleNotFoundError`.
 - [ ] **Step 3: Implement** `narration/engines.py`:
 
 ```python
@@ -816,8 +863,12 @@ class Converter(Protocol):
 class KokoroEngine:
     def record(self, text, out_path, voice, speed):
         from pydub import AudioSegment
-        from text_to_speech import generate_audio
-        generate_audio(text, str(out_path), voice=voice, speed=speed)
+        from text_to_speech import clean_markdown_text, generate_audio
+        # The CLI's chain for a .md file: clean_markdown_text, then generate_audio
+        # (which only runs prepare_for_tts). Without the cleaning, headings,
+        # emphasis markers and link URLs are read aloud, and words.check can't
+        # catch it because it strips exactly that markup.
+        generate_audio(clean_markdown_text(text), str(out_path), voice=voice, speed=speed)
         return len(AudioSegment.from_file(out_path)) / 1000
 
 
@@ -1022,7 +1073,7 @@ class AgentTools:
         return {"ok": True}
 ```
 
-- [ ] **Step 4: Run them and see them pass.** Run the light test command, with `-k agent_tools`.
+- [ ] **Step 4: Run them and see them pass.** Run the light test command, with `-k "agent_tools or engines"`.
 - [ ] **Step 5: Commit, as separate commits:**
   - "narration: engine interfaces, real adapters and fakes";
   - "narration: the six agent tools, with limits and claim checks".
@@ -1389,7 +1440,7 @@ async def _respond(send, status, body):
   - `/agent/mcp` (the six tools);
   - `/runner/mcp` (`open`, `finalize`, `status`);
   - `GET /runner/files/{item_id}/episode.mp3`.
-- Produces: `python -m narration`. It reads `NARRATION_DATA_DIR`, `NARRATION_RUNNER_TOKEN_FILE`, `NARRATION_HOST` (default `127.0.0.1`), `NARRATION_PORT` (default `8770`) and `NARRATION_ALLOWED_HOSTS` (comma-separated `host:port`; default `127.0.0.1:8770,localhost:8770`). It takes `--fake-engines` for local smoke tests.
+- Produces: `python -m narration`. It reads `NARRATION_DATA_DIR`, `NARRATION_RUNNER_TOKEN_FILE`, `NARRATION_HOST` (default `127.0.0.1`), `NARRATION_PORT` (default `8770`) and `NARRATION_ALLOWED_HOSTS` (comma-separated `host:port`; default `127.0.0.1:8770,localhost:8770`). It takes `--fake-engines` for local smoke tests. With real engines it loads `.env` (as `verify_audio.py` does) and exits at startup if `GEMINI_API_KEY` is still unset; the fake path never needs the key.
 
 - [ ] **Step 1: Write the failing tests:**
 
@@ -1455,6 +1506,48 @@ def test_host_not_on_allow_list_is_refused(tmp_path):
         r = c.post("/agent/mcp", json=body, headers={"Authorization": f"Bearer {token}",
                    "Accept": "application/json, text/event-stream", "Content-Type": "application/json"})
         assert r.status_code == 421  # Host check (S1); Content-Type is valid, so 400 can't mask it
+
+
+def test_engine_errors_reach_the_agent_with_their_message(tmp_path):
+    class LongAudioVerifier:  # what verify_audio raises past MAX_SINGLE_CALL_MINUTES
+        def check(self, audio_path, text):
+            raise ValueError("This audio is 17:30 long, but reliable single-call verification "
+                             "tops out at ~15 minutes. Add [BREAK] markers to the text and "
+                             "regenerate the audio so verification can be chunked.")
+
+    store = WorkItemStore(tmp_path)
+    _, token = store.open("x", {})
+    app = build_app(store, AgentTools(store, FakeTTS(), LongAudioVerifier(), FakeG2P()),
+                    RunnerTools(store, FakeConverter()), RUNNER,
+                    allowed_hosts=["testserver", "testserver:80"])
+    hdr = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json",
+           "Authorization": f"Bearer {token}"}
+
+    def call(c, i, name):  # stateless_http=True: tools/call needs no initialize first
+        body = {"jsonrpc": "2.0", "id": i, "method": "tools/call",
+                "params": {"name": name, "arguments": {}}}
+        return c.post("/agent/mcp", json=body, headers=hdr).json()["result"]
+
+    with TestClient(app) as c:
+        assert call(c, 1, "record")["isError"] is False
+        result = call(c, 2, "check")
+    assert result["isError"] is True
+    assert "Add [BREAK] markers" in result["content"][0]["text"]
+
+
+def test_real_engines_need_a_gemini_key_at_startup(tmp_path, monkeypatch):
+    from narration.__main__ import main
+    (tmp_path / "runner-token").write_text("runner-secret\n")
+    monkeypatch.setenv("NARRATION_RUNNER_TOKEN_FILE", str(tmp_path / "runner-token"))
+    monkeypatch.setenv("NARRATION_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setattr("dotenv.load_dotenv", lambda *a, **k: False)  # ignore any .env in the checkout
+    with pytest.raises(SystemExit, match="GEMINI_API_KEY"):
+        main([])
+    served = []
+    monkeypatch.setattr("uvicorn.run", lambda app, **kw: served.append(kw))
+    main(["--fake-engines"])  # the smoke path needs no key
+    assert served and served[0]["port"] == 8770
 ```
 
 - [ ] **Step 2: Run them and see them fail.**
@@ -1514,11 +1607,14 @@ def build_app(store, agent_tools, runner_tools, runner_token, allowed_hosts):
         return item_id
 
     def run(fn, *args):
-        """Call a tool function; turn our refusals into the SDK's ToolError so the
-        agent sees the message (a plain exception's text is withheld; spike S1)."""
+        """Call a tool function; turn our refusals and the engines' errors into the
+        SDK's ToolError so the agent sees the message (a plain exception's text
+        is withheld; spike S1). ValueError and RuntimeError are what verify_audio
+        and text_to_speech raise, e.g. verify_audio's "add [BREAK] markers"
+        refusal of a single call over 15 minutes."""
         try:
             return fn(*args)
-        except ToolError as e:
+        except (ToolError, ValueError, RuntimeError) as e:
             raise SDKToolError(str(e)) from e
 
     @agent.tool()
@@ -1639,6 +1735,11 @@ def main(argv=None):
         from narration.fakes import FakeConverter, FakeG2P, FakeTTS, FakeVerifier
         tts, ver, g2p, conv = FakeTTS(), FakeVerifier(), FakeG2P(), FakeConverter()
     else:
+        from dotenv import load_dotenv
+        load_dotenv()  # the same .env verify_audio.py reads
+        if not os.environ.get("GEMINI_API_KEY"):
+            raise SystemExit("GEMINI_API_KEY is not set (environment or .env); the Gemini "
+                             "verifier needs it. Pass --fake-engines to run without it.")
         from narration.engines import GeminiVerifier, KokoroEngine, MisakiG2P, Mp3Converter
         tts, ver, g2p, conv = KokoroEngine(), GeminiVerifier(), MisakiG2P(), Mp3Converter()
     store = WorkItemStore(data)
@@ -1651,7 +1752,7 @@ if __name__ == "__main__":
     main()
 ```
 
-- [ ] **Step 4: Run them and see them pass.** Run the light test command, with `-k app`. If `test_mcp_endpoints_are_token_gated` gets a 406 or a 400 for the bare JSON-RPC post, that's fine: the assertion is only `!= 401`. If it gets a 421 or 403, the Host allow-list rejected the test client. Make the allowed hosts in the test fixture match what `TestClient` sends, which is `testserver`.
+- [ ] **Step 4: Run them and see them pass.** Run the light test command, with `-k app`. `test_engine_errors_reach_the_agent_with_their_message` posts `tools/call` directly and expects `{"isError": true, "content": [{"text": ...}]}` back as JSON: with `stateless_http=True` and `json_response=True` the server accepts a call without `initialize` and answers in one JSON body. If `test_mcp_endpoints_are_token_gated` gets a 406 or a 400 for the bare JSON-RPC post, that's fine: the assertion is only `!= 401`. If it gets a 421 or 403, the Host allow-list rejected the test client. Make the allowed hosts in the test fixture match what `TestClient` sends, which is `testserver`.
 - [ ] **Step 5: Commit:** "narration: HTTP app with agent and runner MCP servers, and a download route".
 
 ---
@@ -1675,7 +1776,9 @@ RT="$(cat "$W/runner-token")"
 NARRATION_DATA_DIR="$W/data" NARRATION_RUNNER_TOKEN_FILE="$W/runner-token" NARRATION_PORT=8771 \
 NARRATION_ALLOWED_HOSTS="127.0.0.1:8771" \
   uv run --no-project --with "mcp==2.3.0" --with uvicorn --with hypothesis --with pydantic \
+  --with numpy --with soundfile --with pydub \
   python -m narration --fake-engines > "$W/server.log" 2>&1 & SERVER=$!
+# numpy, soundfile, pydub: narration.words imports text_to_speech for clean_markdown_text.
 for i in $(seq 1 30); do curl -sf http://127.0.0.1:8771/health >/dev/null && break; sleep 1; done
 # Open a work item through the runner MCP endpoint, with a tiny python client using the same SDK.
 OPEN=$(uv run --no-project --with "mcp==2.3.0" python tests/narration/smoke_open.py "$RT")
@@ -1771,6 +1874,8 @@ curl -s http://(tailscale ip -4):8770/health      # {"ok":true}
 ```
 
   (`(id -u)` is fish syntax. In bash, use `$(id -u)`.)
+
+  The server exits at startup if `GEMINI_API_KEY` is unset. Keep it in the checkout's `.env`, which `load_dotenv` finds from the package's location, or add it to the plist's `EnvironmentVariables`.
 - [ ] **Step 3: The agent checks it from the home server's container.** Run `curl -s http://brians-macbook-pro:8770/health`. It should print `{"ok":true}`. The runner token goes to Brian's deploy of Plan 3; it doesn't travel through chat.
 - [ ] **Step 4: Commit:** "narration: launchd template and install doc".
 - [ ] **Step 5: Open the PR** with `reviewed:none`, and run the review tier the spec calls for. This is new code in no daily-use path, so a single review on the session's model is enough. Its description says:
