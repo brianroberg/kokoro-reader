@@ -27,6 +27,8 @@ Agent tokens are per work item: the runner's `open` call mints one, and `finish`
 - **At most 4 `record` calls per work item.** The server enforces this and counts the call **before** running the engine, so a crash can't buy extra rounds.
 - **At most 8 `check` calls per work item.** Each one costs a Gemini call, about 3 cents.
 - **`finish` validates its input and runs the claim checks and the word-preservation check.** A refusal is an error the agent can act on. `finalize` (runner) re-runs the same checks and is authoritative.
+- **Raise the SDK's `ToolError` for every refusal the agent must read** (spike S1, 2026-10-14). In MCP SDK 2.3.0, a plain exception reaches the session only as `"Error executing tool <name>"`, with the message withheld. Only `mcp.server.mcpserver.exceptions.ToolError` passes its text through. `narration.agent_tools.ToolError` stays a plain exception, so the pure modules don't import the SDK, and `app.py` converts it.
+- **The SDK's HTTP client is `httpx2`, not `httpx`** (S1). Starlette's `TestClient` still needs `httpx`, so both are present, and that's expected.
 - **Keep the CLIs working.** `text_to_speech.py`, `verify_audio.py` and `convert_audio.py` stay independently callable (ADR-001).
 - **Red/green TDD,** and commit each step separately.
 - **Testing without the Apple Silicon stack.** The package's tests must not import `mlx_audio`, `torch` or `spacy`. Run them with:
@@ -1452,7 +1454,7 @@ def test_host_not_on_allow_list_is_refused(tmp_path):
         body = {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
         r = c.post("/agent/mcp", json=body, headers={"Authorization": f"Bearer {token}",
                    "Accept": "application/json, text/event-stream", "Content-Type": "application/json"})
-        assert r.status_code in (400, 403, 421)
+        assert r.status_code == 421  # Host check (S1); Content-Type is valid, so 400 can't mask it
 ```
 
 - [ ] **Step 2: Run them and see them fail.**
@@ -1472,6 +1474,8 @@ from starlette.routing import Mount, Route
 
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
+
+from mcp.server.mcpserver.exceptions import ToolError as SDKToolError
 
 from narration.agent_tools import ToolError
 from narration.auth import BearerAuth, bearer
@@ -1506,41 +1510,49 @@ def build_app(store, agent_tools, runner_tools, runner_token, allowed_hosts):
     def item(ctx: Context) -> str:
         item_id = store.item_for_token(bearer(ctx.headers) or "")
         if item_id is None:
-            raise ToolError("unknown or expired work-item token")
+            raise SDKToolError("unknown or expired work-item token")
         return item_id
+
+    def run(fn, *args):
+        """Call a tool function; turn our refusals into the SDK's ToolError so the
+        agent sees the message (a plain exception's text is withheld; spike S1)."""
+        try:
+            return fn(*args)
+        except ToolError as e:
+            raise SDKToolError(str(e)) from e
 
     @agent.tool()
     def get_text(ctx: Context) -> dict:
         """The prepared text, the article's metadata, and how many record rounds are left."""
-        return agent_tools.get_text(item(ctx))
+        return run(agent_tools.get_text, item(ctx))
 
     @agent.tool()
     def replace_text(old: str, new: str, ctx: Context) -> dict:
         """Replace text that appears exactly once in the prepared text."""
-        return agent_tools.replace_text(item(ctx), old, new)
+        return run(agent_tools.replace_text, item(ctx), old, new)
 
     @agent.tool()
     def record(ctx: Context, voice: str = "af_heart", speed: float = 1.0) -> dict:
         """Generate audio from the prepared text. At most four times per article."""
-        return agent_tools.record(item(ctx), voice, speed)
+        return run(agent_tools.record, item(ctx), voice, speed)
 
     @agent.tool()
     def check(ctx: Context) -> dict:
         """Verify the latest recording against the prepared text; returns the report."""
-        return agent_tools.check(item(ctx))
+        return run(agent_tools.check, item(ctx))
 
     @agent.tool()
     def phonemes(word: str, ctx: Context) -> dict:
         """Look up a pronunciation, for a [word](/phonemes/) override."""
-        return agent_tools.phonemes(item(ctx), word)
+        return run(agent_tools.phonemes, item(ctx), word)
 
     @agent.tool()
     def finish(outcome: Literal["clean", "minor", "hold"], ctx: Context,
                remaining_issues: list[Issue] = [], substitutions: list[SubstitutionIn] = []) -> dict:
         """End the session. outcome: clean, minor (issues listed), or hold (content missing or garbled)."""
-        return agent_tools.finish(item(ctx), outcome,
-                                  [i.model_dump() for i in remaining_issues],
-                                  [s.model_dump() for s in substitutions])
+        return run(agent_tools.finish, item(ctx), outcome,
+                   [i.model_dump() for i in remaining_issues],
+                   [s.model_dump() for s in substitutions])
 
     @runner.tool(name="open")
     def open_item(article_text: str, metadata: dict[str, Any]) -> dict:
@@ -1551,7 +1563,7 @@ def build_app(store, agent_tools, runner_tools, runner_token, allowed_hosts):
     def finalize(item_id: str) -> dict:
         """Run the gate; on publish, make the MP3. Idempotent."""
         if not store.exists(item_id):
-            raise ToolError("no such work item")
+            raise SDKToolError("no such work item")
         return runner_tools.finalize(item_id)
 
     @runner.tool()
@@ -1673,17 +1685,40 @@ cat > "$W/mcp.json" <<EOF
 {"mcpServers": {"narration": {"type": "http", "url": "http://127.0.0.1:8771/agent/mcp",
   "headers": {"Authorization": "Bearer $TOKEN"}}}}
 EOF
+# Flag set from spike S1. No --bare: it reads only ANTHROPIC_API_KEY and can't use the subscription.
+# --tools "" is the control that removes built-ins (dontAsk alone let Bash run).
 claude -p "Record this article: call get_text, record, check, then finish with outcome clean. Also try to run the shell command id and report whether you could." \
-  --bare --tools "" --strict-mcp-config --mcp-config "$W/mcp.json" \
+  --tools "" --strict-mcp-config --mcp-config "$W/mcp.json" \
   --allowedTools "mcp__narration__get_text mcp__narration__replace_text mcp__narration__record mcp__narration__check mcp__narration__phonemes mcp__narration__finish" \
-  --permission-mode dontAsk --output-format json > "$W/session.json"
+  --permission-mode dontAsk --setting-sources "" --settings '{"disableAllHooks":true}' \
+  --no-session-persistence --max-budget-usd 0.50 --output-format json > "$W/session.json"
 python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print("cost:", d.get("total_cost_usd")); print(d.get("result","")[:800])' "$W/session.json"
 test -f "$W/data/items/$ITEM/result.json" && echo "PASS: finish recorded" || { echo "FAIL: no result.json"; cat "$W/server.log"; exit 1; }
 ```
 
-  Write `tests/narration/smoke_open.py` using the MCP 2.x **client** to call the runner's `open` tool, with `Authorization: Bearer <runner token>`. Find the 2.x client entry point in the installed SDK (`mcp.client.streamable_http` and `mcp.client.session`, or `mcp.client.client`). Spike S1 already exercised the SDK, so its notes are the first place to look. The script prints the tool's JSON result on one line.
+  And `tests/narration/smoke_open.py`, which uses the MCP 2.x client exactly as spike S1 verified it:
 
-  Use the command line spike S1 recorded if it differs from the one above. S1's result wins.
+```python
+"""Open a work item through the runner endpoint; print the result as one JSON line."""
+import asyncio, json, sys
+from mcp.client import Client
+from mcp.client.streamable_http import create_mcp_http_client, streamable_http_client
+
+URL, TOKEN = "http://127.0.0.1:8771/runner/mcp", sys.argv[1]
+
+
+async def main():
+    http = create_mcp_http_client(headers={"Authorization": f"Bearer {TOKEN}"})
+    async with http, Client(streamable_http_client(URL, http_client=http)) as client:
+        result = await client.call_tool("open", {"article_text": "Pope Leo XIV met the family.",
+                                                 "metadata": {"title": "Smoke"}})
+        assert not result.is_error, result
+        print(result.content[0].text.replace("\n", " "))
+
+asyncio.run(main())
+```
+
+  A `-> dict` tool result arrives as JSON text in `content[0].text`, with `structured_content` set to `None` (S1).
 - [ ] **Step 2: Run it.** Run `bash tests/narration/smoke_claude.sh`. Expected:
   - `PASS: finish recorded`;
   - the session's text says it couldn't run a shell command;

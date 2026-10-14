@@ -150,7 +150,22 @@ sudo pmset repeat cancel        # only if Plan 3 will set its own schedule
 
 *(The spike agents and Brian fill this in.)*
 
-- **S1:**
+- **S1 (2026-10-14, an agent here, 13 `claude -p` calls, about $0.27 at list price on the subscription):**
+  - ⚠️ **Don't use `--bare`.** It reads only `ANTHROPIC_API_KEY` or `apiKeyHelper`, and never OAuth or `CLAUDE_CODE_OAUTH_TOKEN`, so on the subscription it stops with "Not logged in". Without `--bare`, `CLAUDE_CODE_OAUTH_TOKEN` is used: a fake one produced `401 OAuth access token is invalid`, which proves it was read. Step 3's command above was written before this was known.
+  - **The working locked-down flag set:**
+
+    ```
+    claude -p "<prompt>" --tools "" --strict-mcp-config --mcp-config <cfg.json> --allowedTools "<mcp tools>" --permission-mode dontAsk --setting-sources "" --settings '{"disableAllHooks":true}' --no-session-persistence --max-budget-usd <cap> --output-format json
+    ```
+
+    The `init` event listed only the MCP tools, with the server `connected`, and none of the user's other MCP servers or plugins. The session reported that it couldn't run a shell command, read a file or fetch a URL.
+  - ⚠️ **`--tools ""` is the real control. `dontAsk` is not:** without `--tools ""`, `Bash id` ran even though `--allowedTools` named only the MCP tools.
+  - **The tool sees the bearer header** from `--mcp-config` through `ctx.headers`.
+  - **Tool errors:** in SDK 2.3.0 a plain exception reaches the session only as "Error executing tool …". `mcp.server.mcpserver.exceptions.ToolError` passes its message through. Plan 2 now converts its refusals.
+  - **Usage:** `--output-format json` carries `total_cost_usd`, which is a list-price equivalent on the subscription, plus `usage`, `modelUsage.<model>.costUSD`, `num_turns`, `terminal_reason`, `api_error_status` and `permission_denials`.
+  - **Skills:** pass the skill's text with `--append-system-prompt "$(cat SKILL.md)"`, which works with every built-in off. With `--setting-sources ""`, project skills aren't discovered.
+  - **The MCP 2.x client is** `mcp.client.Client(streamable_http_client(url, http_client=create_mcp_http_client(headers=…)))`. That's now in Plan 2, Task 8. The SDK's HTTP client is `httpx2`.
+  - **The Host allow-list matches exactly.** A Host off the list gets 421 and a bad Origin gets 403. The Content-Type check runs first (400), so a test must send `Content-Type: application/json`. Claude Code's HTTP MCP client sends no Origin.
 - **S2 + S3:**
 - **S4 (2026-10-14, an agent here, 12 fetches):**
   - **`/issues` lists every issue on one server-rendered page.** That's 86 `div[data-issue-id]` blocks inside `div.issue-catalog`, in **ascending** order, so the latest issue has the highest number, not the first position. The same data is in an inline `const TNA_ISSUES = [...]` JSON: per issue `number`, `name`, `url`, and `sections[].articles[] {url, title, subtitle, gated}`. It matched the HTML for all 86 issues.
