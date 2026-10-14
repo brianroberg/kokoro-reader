@@ -17,13 +17,13 @@ Brian wants new articles to appear in his podcast feed without starting a sessio
 ## Boundaries that make unattended runs acceptable
 
 Unattended means an agent reads untrusted web text with no one watching. Four boundaries make that acceptable:
-- **A separate, unprivileged macOS user runs it,** with no access to Brian's files.
-- **The agent's tools are an allow-list:** three fixed commands (record, check, phoneme lookup), and edits within the article's own folder. It has no web tools, and no publishing or push credentials.
+- **The agent's only tools are one MCP server's** (`narration`): get and edit the prepared text, record, check, look up phonemes, and finish. Its arguments are typed, and no tool takes a path. Bash, file and web tools are off, and the agent holds no publishing or push credentials.
+- **The agent runs away from Brian's files:** either under a separate macOS user, or in a container off the laptop. The spec proposes the container.
 - **The runner's code fetches and publishes.** The agent never does.
-- **A deterministic word-preservation check runs before publishing.** It holds any recording whose text differs from the article in an undeclared way.
+- **A deterministic gate runs before publishing.** It holds any recording whose text differs from the article in an undeclared way, or whose final check doesn't support the agent's claim.
 
 ## Consequences
 
 - Batch processing now exists, with a nightly cap that's tuned from per-article cost records.
 - The skill gains a second caller, the runner. Changes to the skill now affect unattended runs too, so the result contract (`result.json`) is versioned with it.
-- Moving the agent off the laptop later means replacing three local commands with remote calls. The skill and the contract stay the same.
+- The agent reaches the toolkit only through the MCP server, so whether the agent runs on the Mac or elsewhere comes down to the server's transport (stdio or HTTP over the tailnet). The skill and the contract stay the same.

@@ -1,7 +1,9 @@
 # Unattended article-to-podcast pipeline: design
 
 **Status:** draft for Brian's review, 2026-10-14. Not approved yet. Nothing gets built until it is.
-**Decided with:** Brian, by voice, 2026-10-14. The assistant made the calls under "Decisions made here (open to veto)".
+- **Revision 2 (same day):** the agent's tools become one MCP server (Brian's call). There's also a **proposed** scope change, still waiting on his decision: move the agent off the laptop in v1 (see "Where the runner and agent run").
+
+**Decided with:** Brian, by voice and on this PR, 2026-10-14. The assistant made the calls under "Decisions made here (open to veto)".
 **Relationship to ADR-001:** an agent still orchestrates each recording and makes the judgment calls. What changes is that the session runs on a schedule, with nobody at the keyboard. See `docs/adr-002-unattended-runs.md`.
 
 ## Goal
@@ -19,7 +21,9 @@ New articles from the sources Brian follows appear as checked episodes in his Au
   - When content is missing or garbled, it's held and Brian gets a push saying why.
 - **Notices come by push.** Holds and repeated failures notify at once. A summary of the night's results arrives each morning.
 - **The agent runs on Brian's Claude subscription.**
-- **Approach: a nightly job on the Mac, as a first implementation.** Brian's longer-term aim is to contain agents off his main laptop. The design keeps a seam so the agent can move later (see "Containment").
+- **The agent reaches the work through an MCP server, not shell commands** (revision 2). The skill stays as its guide to judgment.
+- **No name includes a TTS model's name,** because the model will likely change (his PR comment). That applies to the Mac account, the MCP server, the launchd job and the container. The repo keeps its name.
+- **Approach: a nightly job,** with the agent contained. His longer-term aim is to contain agents off his main laptop. Whether that happens in v1 is the open proposal below.
 - **Cost is measured per article.** The cap of 5 articles a night is a starting point, tuned from real numbers once it runs.
 - **Property-based tests are in scope** (see "Testing").
 
@@ -33,35 +37,94 @@ New articles from the sources Brian follows appear as checked episodes in his Au
 
 ## Architecture
 
-Each night a scheduled job on the Mac runs these steps in order:
+Each night a scheduled runner, which is plain code, takes these steps:
 
 1. **Discover.** For each source, list candidate articles and add any new in-scope ones to the record as `queued`.
 2. **Pick.** Take up to 5 `queued` articles, oldest first.
 3. **Per article:**
-   1. **Fetch (runner).** Run article-assistant to save the article's text and metadata in its work folder. This step is deterministic; the agent doesn't fetch anything.
-   2. **Record (agent session).** One headless Claude Code session prepares the text, records, checks and fixes, following the skill. It ends by writing `result.json`.
-   3. **Gate (runner).** Validate `result.json`, then run the word-preservation check (see "Quality gate").
-   4. **Publish (runner).** Convert to MP3 with tags, upload to Audiobookshelf with episode notes, and record the outcome.
+   1. **Fetch (runner).** Run article-assistant to get the article's text and metadata, then open a work item on the narration server.
+   2. **Record (agent session).** One headless Claude Code session prepares the text, records, checks and fixes, following the skill. It does all of this through the narration server's tools, and ends by calling `finish`.
+   3. **Gate (narration server).** Run the word-preservation check and the claim checks (see "Quality gate").
+   4. **Publish (runner).** Have the server convert to MP3 with tags, then upload it to Audiobookshelf with episode notes, and record the outcome.
 4. **Notify.** Send pushes for holds and for repeated failures, plus one morning summary if anything happened.
 
-**Who does what, and why.** The runner, which is plain code, does everything that needs the network or a credential: fetching, publishing and pushing. The agent session gets only what judgment is needed for: preparing the text, deciding what to fix, and re-recording. So the agent never holds the Audiobookshelf key or the push token, and never needs open web access. Its only network use is the check step, which calls Gemini through a fixed command.
+### The narration server (MCP)
 
-### Containment
+One small Python MCP server, named `narration`, wraps the toolkit's functions. It owns each article's work folder, and the agent never handles a path. It has two sets of tools, each behind its own bearer token.
 
-- **A separate macOS user** (working name `kokoro-agent`) owns the work. It has its own checkouts of this repo and article-assistant, its own data folder, and its own Claude Code login. It can't read Brian's home folder or files.
-- **The agent's tools are an allow-list,** set in the session's Claude Code settings:
-  - **Bash runs only three commands,** and nothing else:
-    - `record`, which wraps `text_to_speech.py`;
-    - `check`, which wraps `verify_audio.py`;
-    - `phonemes`, which looks up a pronunciation with misaki's G2P.
-  - **File reads and edits stay inside that article's work folder.**
-  - **No web tools.**
-- **Keys live with the wrappers, not the agent's environment.** Each wrapper loads only the key it needs (the Gemini key for `check`).
-- **The seam for moving the agent later.** The agent touches the work only through those three commands plus edits to `prepared.md`. Later, the commands can become calls to a small service on the Mac over the tailnet, and the agent can run in a sandbox elsewhere (roadmap item 4). The skill and the result contract stay the same.
+**Agent tools.** These are the only tools the agent session has:
 
-Approaches considered and set aside:
-- **An agent on the home server, calling into the Mac.** The assistant that would host it holds unrelated credentials, so a hostile article would put more at risk there, not less.
-- **A fixed script, with the model asked only which issues to fix.** It's the most contained option, but it reverses part of ADR-001 and can't test pronunciation fixes the way the skill does.
+| Tool | Does |
+|---|---|
+| `get_text()` | Returns the prepared text and the article's metadata |
+| `replace_text(old, new)` | An exact-match edit of the prepared text, like Claude Code's Edit tool |
+| `record(voice?, speed?)` | Generates the audio from the prepared text, then returns its duration. **It refuses a fifth call per article.** |
+| `check()` | Runs the Gemini verification and returns the report. The server keeps every report. |
+| `phonemes(word)` | Looks up a pronunciation with misaki's G2P, for phonetic overrides |
+| `finish(outcome, remaining_issues, substitutions)` | Ends the session with a typed result. The input is validated on the spot, so a malformed result is an error the agent can fix while it's still running. |
+
+**Runner tools.** The agent never sees these:
+- `open(article_text, metadata)` creates a work item.
+- `finalize(id, tags)` runs the gate, then converts to MP3.
+- `download(id)` is a plain HTTP route for the MP3.
+- `status(id)`.
+
+**The server holds the Gemini key.** It doesn't hold the Audiobookshelf key, because the runner publishes.
+
+**The CLIs stay.** `text_to_speech.py`, `verify_audio.py` and `convert_audio.py` remain independently callable, as ADR-001 requires. The server calls the same functions. Brian's interactive sessions can use the same server, so there's one interface rather than two.
+
+### The agent session
+
+- `claude -p` runs with only the `narration` server's agent tools. Bash, file tools and web tools are all switched off.
+- *Unverified:* the exact flags for "only these MCP tools, nothing built in." The expectation is `--strict-mcp-config` with `--mcp-config` plus allow and deny lists. It gets tested first in the plan.
+- The prompt names the article, and the skill tells the agent how to judge.
+
+**The prompt-injection risk remains.** The article's text reaches the agent through `get_text()`. The protections against it:
+- the agent has no tools beyond the six above;
+- each tool's arguments are typed, and no tool takes a path;
+- the word-preservation check runs before anything publishes.
+
+## Where the runner and agent run
+
+The narration server always runs on the Mac, because MLX needs Apple Silicon. The question is where the runner and the agent run.
+
+### L. On the Mac (the design as first approved)
+
+- The runner and the agent run under a separate macOS user, **`narration-agent`**. Brian's comment ruled out a name with `kokoro` in it.
+- The narration server runs under that same user, over stdio.
+- **Containment:** the user can't read Brian's files, and the agent has only the MCP tools.
+
+### R. Off the laptop: a container on the home server (proposed: roadmap item 4, done now)
+
+- **The Mac runs only the narration server.** It runs as Brian's own user, as a launchd LaunchAgent (`net.robergb.narration`). It's bound to the Mac's tailnet address, with the two tokens. Brian's voicemode server already works this way.
+- **No second Mac user is needed.** The account existed only because an LLM would be reading untrusted text on the Mac. Here the Mac runs deterministic code that takes typed arguments and never reads instructions.
+- **The runner and the agent share one container on the home server** (working name `narration-agent`):
+  - **It starts from agentbox's image and its `restricted` egress profile.** Allowed: `api.anthropic.com`, the Mac's narration endpoint, the source sites (for fetching), Audiobookshelf and the push server.
+  - **Inside the container, the runner and the agent are different Linux users.** The runner's secrets (the Audiobookshelf key, the push token, the runner token) are files the agent user can't read.
+  - **The agent user holds only** its Claude login and the agent token.
+- **The home server is always on.** Discovery and the record can run any time; only recording needs the Mac to be awake.
+- **This container is not the existing assistant's.** Revision 1 set aside "an agent on the home server" because that assistant holds unrelated credentials. That reason applies to running inside the assistant, not to the host.
+
+### Trade-offs
+
+| | L (on the Mac) | R (off the laptop) |
+|---|---|---|
+| Second Mac account | Yes (`narration-agent`) | **No** |
+| What a hijacked agent can reach | MCP tools, on the laptop | MCP tools, from a credential-free container |
+| Moving parts | One machine | Two machines, a tailnet link and a container |
+| What Brian deploys | A user account and a launchd job | A launchd job, plus a compose service on the home server |
+| Mac asleep overnight | That night is skipped | Same, but discovery still runs |
+| Roadmap item 4 | Still to do | **Done** |
+
+**Recommendation: R.** It costs about the same as L. The tailnet link, the tokens and the container replace the Mac account and its setup. It also removes the account Brian would rather not create, and it finishes item 4. The cost is one more failure point: if the Mac isn't reachable, recording waits.
+
+**Two open questions move rather than go away:**
+- the Mac still has to be awake overnight;
+- the headless Claude Code login moves from a Mac user into the container.
+
+**Not proposed:**
+- **The shelved `agents` VM,** because reviving it means taking RAM back from the home server's main VM.
+- **The existing assistant's container.**
 
 ## Sources
 
@@ -85,7 +148,7 @@ text_rules = []                     # source-specific preparation notes for the 
 
 ## State and work folders
 
-**The record** is one SQLite file in the agent user's data folder, with one row per article, keyed by its URL. Each row holds:
+**The record** is one SQLite file, kept by the runner, with one row per article, keyed by its URL. Each row holds:
 - the source, title, edition and publication date;
 - its status: `baseline`, `queued`, `in_progress`, `published`, `published_with_notes`, `held` or `failed`;
 - the number of failed nights and the last error;
@@ -93,37 +156,39 @@ text_rules = []                     # source-specific preparation notes for the 
 - the Claude tokens and cost (from `claude -p --output-format json`), an estimated Gemini cost, and the run time;
 - the Audiobookshelf episode id, and timestamps.
 
-**Each article gets a work folder,** `data/work/<source>/<slug>/`, which is kept after the run:
+**Each article gets a work folder on the Mac,** kept by the narration server and kept after the run:
 - `source.md` and `metadata.yaml`, as fetched;
-- `prepared.md`, the agent's edited text;
+- `prepared.md`, the text after the agent's edits;
 - `report-<n>.txt`, one per check;
-- `result.json`, and the final WAV and MP3.
+- `result.json`, the `finish` payload;
+- the final WAV and MP3.
 
 These folders later become the test set for comparing TTS models.
 
 ## The agent session's contract
 
-**Input:** the work folder, the skill, and the source's `text_rules`.
+**Input:** a work item id, and the skill, adapted so its steps name the narration tools instead of shell commands.
 
-**Output:** `result.json`:
+**Output:** a `finish` call:
 
 ```json
 {
   "outcome": "clean | minor | hold",
-  "rounds": 2,
   "remaining_issues": [{"kind": "mispronunciation", "where": "12:40", "note": "Pengelley"}],
-  "substitutions": [{"from": "XIV", "to": "the Fourteenth", "why": "roman numeral"}],
-  "audio": "recording.wav"
+  "substitutions": [{"from": "XIV", "to": "the Fourteenth", "why": "roman numeral"}]
 }
 ```
 
-- **At most 4 record-and-check rounds per article.** `record` counts its calls per work folder and refuses a fifth, so the limit doesn't rest on the prompt alone.
+- **At most 4 rounds per article.** `record` enforces this itself, so the limit doesn't rest on the prompt.
 - **`hold` is for missing or garbled content.** `minor` is for issues the skill would "likely ignore" or couldn't fix.
-- **Every word change goes in `substitutions`.** The quality gate rejects any undeclared change.
+- **Every word change goes in `substitutions`.** The gate rejects any undeclared change.
+- **A session that ends without calling `finish`** is a failure.
 
-## Quality gate (runner, deterministic)
+## Quality gate (narration server, deterministic)
 
-1. **Validate `result.json`** against its schema. If it's invalid or missing, the article is marked `failed`.
+1. **Claim checks.** The server compares the agent's claim with its own records:
+   - `finish` must come after a `check` that ran on the latest recording;
+   - `clean` or `minor` is refused if that check's deterministic pre-check flagged truncation or long silences.
 2. **Word-preservation check.** This enforces the skill's rule, "never change what the article says." Both texts are reduced to plain words. In `prepared.md`, a `[word](/phonemes/)` override is read as its displayed word. Allowed punctuation and pause changes are set aside, and each declared substitution is reversed. The two word sequences must then match exactly; any difference holds the article. This also stops a hijacked session from adding words of its own.
 3. **Outcome:**
 
@@ -133,7 +198,7 @@ These folders later become the test set for comparing TTS models.
    | `minor` | Publish, with the issues in the episode notes. |
    | `hold` | Hold, and push the reason. |
    | A gate failure | Hold. |
-   | A tool or network error | Mark `failed` and retry the next night. After 3 failed nights, hold and push. |
+   | A tool error, network error, or no `finish` call | Mark `failed` and retry the next night. After 3 failed nights, hold and push. |
 
 ## Publishing
 
@@ -143,24 +208,28 @@ These folders later become the test set for comparing TTS models.
 
 ## The nightly job
 
-- A launchd job at 01:00. launchd runs a missed calendar job at the next wake, so a night the Mac was asleep or away just shifts the work.
-- **One run at a time,** enforced by a lock file.
+- **It starts at 01:00:**
+  - **L:** a launchd job, which runs a missed calendar job at the next wake;
+  - **R:** cron in the container. It retries reaching the Mac until 05:00, then gives up for the night.
+- **One run at a time,** enforced by a lock.
 - **No new article starts after 06:00.**
 - **Dry-run mode** does everything except publish and push.
 - **The pushes** use a dedicated push topic and token for this job, not one shared with other services.
 
 ## Testing
 
-**Built test first throughout.** Pure logic is kept apart from I/O, so it's tested without network calls.
+**Built test first throughout.** Pure logic is kept apart from I/O, so it's tested without network calls. The narration tools are plain functions, so they're tested the same way.
 
 - **Example tests, with saved fixtures** (a feed sample and an issue-page sample):
   - discovery parsing and the in-scope rule;
   - the first-run baseline;
   - every state transition;
   - the cap and the ordering;
-  - `result.json` validation;
+  - `finish` validation;
+  - the claim checks;
   - outcome mapping;
-  - the summary text.
+  - the summary text;
+  - the per-tool round limit.
 - **Property tests (Hypothesis):**
   - No article is ever published twice, across any sequence of runs, crashes and reruns.
   - Every article processed in a run ends in exactly one status.
@@ -169,9 +238,12 @@ These folders later become the test set for comparing TTS models.
   - **Word preservation:**
     - for any article text and any mix of allowed edits plus declared substitutions, the check passes;
     - for any undeclared word change (insert, delete or replace), it fails.
+  - `replace_text` can't touch anything outside its own work item, whatever its arguments.
 - **Containment tests:**
-  - A scripted check confirms that `kokoro-agent` can't read Brian's home folder.
-  - A planted test article carries hidden instructions, for example to fetch a URL or edit a file outside the folder. The session must make no calls outside the allow-list, and any text it inserts must fail the word check.
+  - A real headless session is asked to run a shell command, read a file and fetch a URL. All three must be refused.
+  - A planted test article carries hidden instructions. Any text it gets inserted must fail the word check.
+  - **For R:** from inside the agent user, the runner's secret files can't be read, and a host off the allow-list can't be reached.
+  - **For L:** `narration-agent` can't read Brian's home folder.
 - **Acceptance:** one real article end to end in dry run, then published. Brian listens to it before the schedule is turned on.
 
 ## Order of work
@@ -179,10 +251,10 @@ These folders later become the test set for comparing TTS models.
 0. **Prerequisites:**
    - this repo's #6 (rename the skill to `recording-article-audio`);
    - article-assistant #3 (the New Atlantis description and publication date).
-1. **v1, as above.**
+1. **v1, as above,** in whichever of L or R Brian picks.
 2. **Cost review** after a couple of weeks, to set the cap from the recorded numbers.
-3. **A model-testing harness** that replays saved work folders through a candidate TTS or checking model. This also covers this repo's #3 (local models for the check).
-4. **Move the agent off the laptop.** The three commands become a tailnet service on the Mac, and the agent runs in a sandbox elsewhere.
+3. **A model-testing harness** that replays saved work folders through a candidate TTS or checking model, behind the same `record` and `check` tools. This also covers this repo's #3 (local models for the check).
+4. **Move the agent off the laptop,** unless R is chosen, in which case it's already done.
 5. **More sources.**
 
 Future work Brian named: remove the Gemini dependency, and use newer TTS models that can redo a single passage instead of the whole recording.
@@ -191,15 +263,19 @@ Future work Brian named: remove the Gemini dependency, and use newer TTS models 
 
 | Decision | Why | If it's wrong |
 |---|---|---|
-| The runner fetches and publishes; the agent doesn't | Keeps the Audiobookshelf key, the push token and open web access out of the agent's reach | Little lost; the skill's fetch and publish steps simply move to code |
+| The runner fetches and publishes; the agent doesn't | Keeps the Audiobookshelf key, the push token and open web access out of the agent's reach | Little lost; those steps simply sit in code |
+| One MCP server, with separate agent and runner tool sets and tokens | The agent can't open work items or download files; one process to run | Splitting it into two servers later is mechanical |
+| The server name is `narration`; the Mac user (L) and the container (R) are `narration-agent`; the launchd label is `net.robergb.narration` | Brian's rule: no model name | A rename |
 | SQLite for the record | One file; safe updates mid-run | A JSON file would also work; it's a small swap |
 | Code lives in this repo, in a `pipeline/` folder | Uses the toolkit directly, and keeps article-assistant light (ADR-001) | Moving it to its own repo later is mechanical |
 | Web-only pieces count from the start date | Brian asked for every article; the edition rule can't cover pieces without an edition | A web-only piece could be recorded that he'd have skipped. He'd see it in the feed and the summary |
 | Up to 4 rounds per article | The skill expects 2–4 for a long article | Too low means more holds; too high costs more. Both show up in the recorded numbers |
-| Start at 01:00, no new article after 06:00 | Overnight, and done before he's up | Change the launchd times |
+| Start at 01:00, no new article after 06:00 | Overnight, and done before he's up | Change the schedule |
 
 ## Open questions to settle early in the plan
 
-- **Does a scheduled wake work on this MacBook when it's closed and on power?** If not, it has to be left open and awake overnight (for example with `caffeinate`).
-- **Can a second macOS user run headless Claude Code on Brian's subscription?** This needs to be confirmed, along with how its login is kept.
+- **What are the exact `claude -p` flags** that give a session only the narration server's tools, with every built-in tool off? Verify before building on it.
+- **Does a scheduled wake work on this MacBook when it's closed and on power?** If not, it has to be left open and awake overnight (for example with `caffeinate`). This applies to L and R alike.
+- **How does headless Claude Code log in on Brian's subscription?** That's under a second macOS user (L) or inside a container (R), and it covers how the login is kept and renewed.
+- **Does MLX get the GPU when the narration server runs as a LaunchAgent** rather than from a terminal? This matters for R.
 - **How does The New Atlantis's `/issues` page mark which articles belong to an edition?** This decides how the listing is read.
