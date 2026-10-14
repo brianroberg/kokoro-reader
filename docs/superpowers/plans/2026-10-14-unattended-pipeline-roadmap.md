@@ -152,4 +152,13 @@ sudo pmset repeat cancel        # only if Plan 3 will set its own schedule
 
 - **S1:**
 - **S2 + S3:**
-- **S4:**
+- **S4 (2026-10-14, an agent here, 12 fetches):**
+  - **`/issues` lists every issue on one server-rendered page.** That's 86 `div[data-issue-id]` blocks inside `div.issue-catalog`, in **ascending** order, so the latest issue has the highest number, not the first position. The same data is in an inline `const TNA_ISSUES = [...]` JSON: per issue `number`, `name`, `url`, and `sections[].articles[] {url, title, subtitle, gated}`. It matched the HTML for all 86 issues.
+  - **Fetching it is cheap with compression:** about 194 KB gzipped (2.3 MB raw), and Cloudflare caches it.
+  - **There's no cheaper per-issue source.** `/issues/<slug>` serves the same full catalog. The REST `issue` objects list no articles, and no taxonomy links articles to issues.
+  - **No. 86 (Fall 2026) has 9 articles,** and they are exactly the feed's nine 2026-09-08 items.
+  - **The feed's 2026-10-07 piece, "Are We Really on the Path to AGI?", is web-only.** It's in no issue, and its header `aside` shows a date instead of a season. It has no "web-only" label anywhere: the only signal is the missing `/issues/` link in that `aside`.
+  - **The article's edition is the header `aside` link,** `/issues/no-86-fall-2026`. A page-wide search is wrong: the site-wide nav links the current issue ("No. 86 – Fall 2026") on every page, and "Related" cards link other issues. Plan 1 Task 2 was revised for this.
+  - **Dates:** trust JSON-LD `datePublished`, which equals the feed's pubDate. The visible "Published online on …" text can be days later.
+  - **"Gated" (subscriber-only) articles still serve their full text.** `zoning-alone` has 4,415 words in its body. 8 of No. 86's 9 articles are gated.
+  - **The fixture for Plan 3** (blocks No. 85 and No. 86, plus a trimmed `TNA_ISSUES`, 39.7 KB) is kept in the assistant workspace at `local/kokoro-pipeline/new_atlantis_issues_sample.html` (the parser scripts are beside it, in `s4-scripts/`), to be copied into `tests/fixtures/` when Plan 3 starts.

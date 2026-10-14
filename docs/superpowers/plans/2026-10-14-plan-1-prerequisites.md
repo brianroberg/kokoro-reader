@@ -27,7 +27,7 @@
 ## Review Focus
 
 1. **A JSON-LD graph whose author is an `@id` reference to a `Person` node.** The real New Atlantis page has exactly this shape. The author must come out as the person's name, not empty and not the URL. Test in Task 2.
-2. **An issue marker written "No. 86 – Fall 2026"** (an en dash, with no parentheses). This is the live site's format, and the current regex expects "No. 86 (Fall 2026)". Test in Task 2.
+2. **The site-wide header names the *current* issue on every page** (a nav link reading "No. 86 – Fall 2026"), and "Related" cards link other issues. The edition must come from the article's own header `aside` (the `/issues/no-NN-season-year` link next to the `h1`), never from a page-wide search. Otherwise an older article, or a web-only one, is labelled with the current issue. Test in Task 2.
 3. **No `datePublished` at all.** The date falls back to the start of the edition's season, not to today and not to nothing. Test in Task 2.
 4. **`AGENTBOX_GITHUB=off` with GitHub unreachable.** The firewall must not even try to fetch GitHub's IP ranges, and the sandbox must start. Test in Task 4.
 5. **An entrypoint given a command.** It must still apply the firewall before running it, and run it as `node`, never as root. Test in Task 3.
@@ -94,13 +94,15 @@ git commit -m "Rename the skill to recording-article-audio, in the SKILL.md layo
 
 ---
 
-### Task 2: New Atlantis metadata: the JSON-LD graph, description, date, the en-dash issue marker, and `--json` (article-assistant #3)
+### Task 2: New Atlantis metadata: the JSON-LD graph, description, date, the edition from the article header, and `--json` (article-assistant #3)
 
 **Context, checked against the live page on 2026-10-14 (`/publications/zoning-alone`):**
 - The page's JSON-LD is a Yoast **`@graph`**: `{"@context": …, "@graph": [Article, WebPage, Person, …]}`. The extractor looks only for a top-level `"@type": "Article"`, so on today's pages it silently falls back to the `<h1>` and the byline, and never reads `datePublished`.
 - In the graph, `Article.author` is `{"@id": "…/authors/joseph-lawler#person"}`, a reference that is resolved through the `Person` node's `name`.
 - The description is in `<meta property="og:description">`, in `<meta name="description">`, and in the `WebPage` node.
-- The issue marker reads `No. 86 – Fall 2026`. The current regex expects `No. 86 (Fall 2026)`.
+- **The article's edition is a link in its header `aside`,** beside the `h1`: `<a class="link-transition" href="https://www.thenewatlantis.com/issues/no-86-fall-2026">Fall 2026</a>`. A web-only piece's `aside` has the type and a date but no `/issues/` link. Spike S4 checked this on three pages on 2026-10-14.
+- ⚠️ **The text "No. 86 – Fall 2026" also appears on every page,** in a site-wide nav link to the *current* issue. "Related" cards link other issues too. The existing page-wide regexes (`No. N (Season Year)`, then any "Season Year" text) can therefore attach the current issue to any article. On today's layout, read the `aside` only, and keep the page-wide search only as a fallback for pages without that header (old layouts, and this repo's existing tests).
+- **Subscriber-only ("gated") pages still serve their full text.** `zoning-alone` is gated, and its `div.gutenberg-content` has 4,415 words. This matches this repo's commit cc0927c, "New Atlantis serves full content without auth".
 
 **Files:**
 - Modify: `article_assistant.py`: `NewAtlantisExtractor.extract_metadata`, a new `season_start_date()`, `_run_metadata`, and `main()` (the `--json` flag)
@@ -140,7 +142,21 @@ GRAPH_PAGE = """
    "name": "Joseph Lawler"}
 ]}
 </script></head>
-<body><h1>Zoning Alone</h1><div><span>No. 86 – Fall 2026</span></div></body></html>
+<body>
+<nav><div class="hidden lg:block"><a class="link-transition" href="https://www.thenewatlantis.com/issues/no-87-winter-2027">No. 87 – Winter 2027</a></div></nav>
+<div class="article-header"><div><h1>Zoning Alone</h1></div>
+  <aside><span>Essay</span><a class="link-transition" href="https://www.thenewatlantis.com/issues/no-86-fall-2026">Fall 2026</a></aside></div>
+<div class="gutenberg-content"><p>Body.</p></div>
+<section class="related"><a href="https://www.thenewatlantis.com/issues/no-23-winter-2009">Winter 2009</a></section>
+</body></html>
+"""
+WEB_ONLY_PAGE = """
+<html><body>
+<nav><div class="hidden lg:block"><a class="link-transition" href="https://www.thenewatlantis.com/issues/no-86-fall-2026">No. 86 – Fall 2026</a></div></nav>
+<div class="article-header"><div><h1>Are We Really on the Path to AGI?</h1></div>
+  <aside><span>Essay</span><span>October 7, 2026</span></aside></div>
+<section class="related"><a href="https://www.thenewatlantis.com/issues/no-85-summer-2026">Summer 2026</a></section>
+</body></html>
 """
 URL = "https://www.thenewatlantis.com/publications/zoning-alone"
 
@@ -156,10 +172,16 @@ class TestNewAtlantisGraph:
         md = NewAtlantisExtractor().extract_metadata(GRAPH_PAGE, URL)
         assert md["description"] == "Zoning made us lonely. The Court may end it."
 
-    def test_reads_an_en_dash_issue_marker(self):
+    def test_edition_comes_from_the_article_header_not_the_nav_or_related(self):
+        # The nav names a different (current) issue and a Related card links another;
+        # only the header aside's link is the article's own edition.
         md = NewAtlantisExtractor().extract_metadata(GRAPH_PAGE, URL)
         assert md["issue_number"] == "86"
         assert md["issue_season"] == "Fall 2026"
+
+    def test_web_only_piece_has_no_edition(self):
+        md = NewAtlantisExtractor().extract_metadata(WEB_ONLY_PAGE, URL)
+        assert "issue_number" not in md and "issue_season" not in md
 
     def test_parenthesised_issue_marker_still_works(self):
         page = "<html><body><h1>T</h1><p>From No. 79 (Winter 2025) issue</p></body></html>"
@@ -167,7 +189,9 @@ class TestNewAtlantisGraph:
         assert (md["issue_number"], md["issue_season"]) == ("79", "Winter 2025")
 
     def test_date_falls_back_to_the_season_start(self):
-        page = "<html><body><h1>T</h1><span>No. 86 – Fall 2026</span></body></html>"
+        page = ('<html><body><div><div><h1>T</h1></div><aside>'
+                '<a href="https://www.thenewatlantis.com/issues/no-86-fall-2026">Fall 2026</a>'
+                '</aside></div></body></html>')
         md = NewAtlantisExtractor().extract_metadata(page, URL)
         assert md["date_published"] == "2026-09-01"
 
@@ -293,19 +317,40 @@ def _has_type(node, wanted):
             metadata["description"] = description
 ```
 
-  Replace the issue-marker block, keeping the season-only fallback below it unchanged:
+  Add this helper, next to `_jsonld_nodes`:
 
 ```python
-        issue_info = soup.find(string=re.compile(r"No\.\s*\d+"))
-        if issue_info:
-            issue_match = re.search(
-                r"No\.\s*(\d+)\s*(?:\(([^)]+)\)|[–—-]\s*((?:Winter|Spring|Summer|Fall|Autumn)\s+\d{4}))",
-                issue_info,
-            )
-            if issue_match:
-                metadata["issue_number"] = issue_match.group(1)
-                metadata["issue_season"] = (issue_match.group(2) or issue_match.group(3)).strip()
+ISSUE_SLUG_RE = re.compile(r"/issues/no-(\d+)-(winter|spring|summer|fall|autumn)-(\d{4})", re.I)
+
+
+def _edition_from_header(soup):
+    """The article's own edition, read from the header aside beside its h1.
+
+    Returns (number, "Season Year") when the aside links an issue, "none" when
+    the aside exists but links no issue (a web-only piece), and None when the
+    page has no such header (older layouts), so callers may fall back.
+    """
+    h1 = soup.find("h1")
+    holder = h1.parent.parent if h1 is not None and h1.parent is not None else None
+    aside = holder.select_one("aside") if holder is not None else None
+    if aside is None:
+        return None
+    for link in aside.select('a[href*="/issues/"]'):
+        m = ISSUE_SLUG_RE.search(link.get("href", ""))
+        if m:
+            return m.group(1), f"{m.group(2).title()} {m.group(3)}"
+    return "none"
 ```
+
+  Then, in `extract_metadata`, put this in front of the existing issue-marker block:
+
+```python
+        edition = _edition_from_header(soup)
+        if isinstance(edition, tuple):
+            metadata["issue_number"], metadata["issue_season"] = edition
+```
+
+  Wrap the existing page-wide blocks, both the `No.` regex and the season-only patterns, in `if edition is None:`, so they run only on pages without the header. Don't change those blocks otherwise.
 
   Just before `metadata["publication"] = "The New Atlantis"`, add the date fallback:
 
@@ -341,7 +386,7 @@ def _has_type(node, wanted):
 - [ ] **Step 5: Commit, as separate commits:**
   - "Read the New Atlantis JSON-LD @graph and resolve author references";
   - "Extract the article description";
-  - "Accept the 'No. 86 – Fall 2026' issue marker; fall back to the season start date";
+  - "Read the edition from the article header (not the site-wide nav); fall back to the season start date";
   - "metadata --json".
 
   Use `git add -p` to split them.
