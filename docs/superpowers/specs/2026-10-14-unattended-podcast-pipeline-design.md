@@ -1,7 +1,8 @@
 # Unattended article-to-podcast pipeline: design
 
 **Status:** draft for Brian's review, 2026-10-14. Not approved yet. Nothing gets built until it is.
-- **Revision 2 (same day):** the agent's tools become one MCP server (Brian's call). There's also a **proposed** scope change, still waiting on his decision: move the agent off the laptop in v1 (see "Where the runner and agent run").
+- **Revision 2 (same day):** the agent's tools become one MCP server (Brian's call).
+- **Revision 3 (same day):** Brian chose option R on the PR. The runner and the agent run in a container on the home server, and the Mac runs only the MCP server. So v1 includes roadmap item 4, and there's no second Mac account.
 
 **Decided with:** Brian, by voice and on this PR, 2026-10-14. The assistant made the calls under "Decisions made here (open to veto)".
 **Relationship to ADR-001:** an agent still orchestrates each recording and makes the judgment calls. What changes is that the session runs on a schedule, with nobody at the keyboard. See `docs/adr-002-unattended-runs.md`.
@@ -23,7 +24,7 @@ New articles from the sources Brian follows appear as checked episodes in his Au
 - **The agent runs on Brian's Claude subscription.**
 - **The agent reaches the work through an MCP server, not shell commands** (revision 2). The skill stays as its guide to judgment.
 - **No name includes a TTS model's name,** because the model will likely change (his PR comment). That applies to the Mac account, the MCP server, the launchd job and the container. The repo keeps its name.
-- **Approach: a nightly job,** with the agent contained. His longer-term aim is to contain agents off his main laptop. Whether that happens in v1 is the open proposal below.
+- **Approach: a nightly job, with the agent off the laptop from v1** (option R, his PR comment). The runner and the agent run in a container on the home server. The Mac runs only the narration server, as Brian's own user, with no second account.
 - **Cost is measured per article.** The cap of 5 articles a night is a starting point, tuned from real numbers once it runs.
 - **Property-based tests are in scope** (see "Testing").
 
@@ -84,17 +85,9 @@ One small Python MCP server, named `narration`, wraps the toolkit's functions. I
 - each tool's arguments are typed, and no tool takes a path;
 - the word-preservation check runs before anything publishes.
 
-## Where the runner and agent run
+## Where things run (option R, chosen 2026-10-14)
 
-The narration server always runs on the Mac, because MLX needs Apple Silicon. The question is where the runner and the agent run.
-
-### L. On the Mac (the design as first approved)
-
-- The runner and the agent run under a separate macOS user, **`narration-agent`**. Brian's comment ruled out a name with `kokoro` in it.
-- The narration server runs under that same user, over stdio.
-- **Containment:** the user can't read Brian's files, and the agent has only the MCP tools.
-
-### R. Off the laptop: a container on the home server (proposed: roadmap item 4, done now)
+The narration server runs on the Mac, because MLX needs Apple Silicon. The runner and the agent run off the laptop.
 
 - **The Mac runs only the narration server.** It runs as Brian's own user, as a launchd LaunchAgent (`net.robergb.narration`). It's bound to the Mac's tailnet address, with the two tokens. Brian's voicemode server already works this way.
 - **No second Mac user is needed.** The account existed only because an LLM would be reading untrusted text on the Mac. Here the Mac runs deterministic code that takes typed arguments and never reads instructions.
@@ -105,26 +98,14 @@ The narration server always runs on the Mac, because MLX needs Apple Silicon. Th
 - **The home server is always on.** Discovery and the record can run any time; only recording needs the Mac to be awake.
 - **This container is not the existing assistant's.** Revision 1 set aside "an agent on the home server" because that assistant holds unrelated credentials. That reason applies to running inside the assistant, not to the host.
 
-### Trade-offs
+**What this costs:**
+- **Two machines and a tailnet link.** If the Mac isn't reachable, recording waits until the next night.
+- **Brian deploys** a compose service on the home server, plus the launchd job on the Mac.
 
-| | L (on the Mac) | R (off the laptop) |
-|---|---|---|
-| Second Mac account | Yes (`narration-agent`) | **No** |
-| What a hijacked agent can reach | MCP tools, on the laptop | MCP tools, from a credential-free container |
-| Moving parts | One machine | Two machines, a tailnet link and a container |
-| What Brian deploys | A user account and a launchd job | A launchd job, plus a compose service on the home server |
-| Mac asleep overnight | That night is skipped | Same, but discovery still runs |
-| Roadmap item 4 | Still to do | **Done** |
-
-**Recommendation: R.** It costs about the same as L. The tailnet link, the tokens and the container replace the Mac account and its setup. It also removes the account Brian would rather not create, and it finishes item 4. The cost is one more failure point: if the Mac isn't reachable, recording waits.
-
-**Two open questions move rather than go away:**
-- the Mac still has to be awake overnight;
-- the headless Claude Code login moves from a Mac user into the container.
-
-**Not proposed:**
+**Considered and set aside:**
+- **L: the runner and the agent on the Mac,** under a separate macOS user. It's simpler, with one machine, but it needs a second Mac account and leaves roadmap item 4 for later.
 - **The shelved `agents` VM,** because reviving it means taking RAM back from the home server's main VM.
-- **The existing assistant's container.**
+- **The existing assistant's container,** because it holds unrelated credentials.
 
 ## Sources
 
@@ -208,9 +189,7 @@ These folders later become the test set for comparing TTS models.
 
 ## The nightly job
 
-- **It starts at 01:00:**
-  - **L:** a launchd job, which runs a missed calendar job at the next wake;
-  - **R:** cron in the container. It retries reaching the Mac until 05:00, then gives up for the night.
+- **It starts at 01:00,** from cron in the container. Discovery runs even when the Mac is unreachable. Recording retries reaching the Mac until 05:00, then waits for the next night.
 - **One run at a time,** enforced by a lock.
 - **No new article starts after 06:00.**
 - **Dry-run mode** does everything except publish and push.
@@ -242,8 +221,8 @@ These folders later become the test set for comparing TTS models.
 - **Containment tests:**
   - A real headless session is asked to run a shell command, read a file and fetch a URL. All three must be refused.
   - A planted test article carries hidden instructions. Any text it gets inserted must fail the word check.
-  - **For R:** from inside the agent user, the runner's secret files can't be read, and a host off the allow-list can't be reached.
-  - **For L:** `narration-agent` can't read Brian's home folder.
+  - From inside the agent user, the runner's secret files can't be read, and a host off the allow-list can't be reached.
+  - The narration server refuses a call without a token, and refuses a runner tool called with the agent token.
 - **Acceptance:** one real article end to end in dry run, then published. Brian listens to it before the schedule is turned on.
 
 ## Order of work
@@ -251,10 +230,10 @@ These folders later become the test set for comparing TTS models.
 0. **Prerequisites:**
    - this repo's #6 (rename the skill to `recording-article-audio`);
    - article-assistant #3 (the New Atlantis description and publication date).
-1. **v1, as above,** in whichever of L or R Brian picks.
+1. **v1, as above,** with the agent in the container on the home server.
 2. **Cost review** after a couple of weeks, to set the cap from the recorded numbers.
 3. **A model-testing harness** that replays saved work folders through a candidate TTS or checking model, behind the same `record` and `check` tools. This also covers this repo's #3 (local models for the check).
-4. **Move the agent off the laptop,** unless R is chosen, in which case it's already done.
+4. ~~Move the agent off the laptop~~: done in v1 (option R).
 5. **More sources.**
 
 Future work Brian named: remove the Gemini dependency, and use newer TTS models that can redo a single passage instead of the whole recording.
@@ -265,7 +244,7 @@ Future work Brian named: remove the Gemini dependency, and use newer TTS models 
 |---|---|---|
 | The runner fetches and publishes; the agent doesn't | Keeps the Audiobookshelf key, the push token and open web access out of the agent's reach | Little lost; those steps simply sit in code |
 | One MCP server, with separate agent and runner tool sets and tokens | The agent can't open work items or download files; one process to run | Splitting it into two servers later is mechanical |
-| The server name is `narration`; the Mac user (L) and the container (R) are `narration-agent`; the launchd label is `net.robergb.narration` | Brian's rule: no model name | A rename |
+| The server name is `narration`, the container is `narration-agent`, and the launchd label is `net.robergb.narration` | Brian's rule: no model name | A rename |
 | SQLite for the record | One file; safe updates mid-run | A JSON file would also work; it's a small swap |
 | Code lives in this repo, in a `pipeline/` folder | Uses the toolkit directly, and keeps article-assistant light (ADR-001) | Moving it to its own repo later is mechanical |
 | Web-only pieces count from the start date | Brian asked for every article; the edition rule can't cover pieces without an edition | A web-only piece could be recorded that he'd have skipped. He'd see it in the feed and the summary |
@@ -275,7 +254,7 @@ Future work Brian named: remove the Gemini dependency, and use newer TTS models 
 ## Open questions to settle early in the plan
 
 - **What are the exact `claude -p` flags** that give a session only the narration server's tools, with every built-in tool off? Verify before building on it.
-- **Does a scheduled wake work on this MacBook when it's closed and on power?** If not, it has to be left open and awake overnight (for example with `caffeinate`). This applies to L and R alike.
-- **How does headless Claude Code log in on Brian's subscription?** That's under a second macOS user (L) or inside a container (R), and it covers how the login is kept and renewed.
-- **Does MLX get the GPU when the narration server runs as a LaunchAgent** rather than from a terminal? This matters for R.
+- **Does a scheduled wake work on this MacBook when it's closed and on power?** If not, it has to be left open and awake overnight (for example with `caffeinate`).
+- **How does headless Claude Code log in on Brian's subscription inside the container?** This covers how the login is kept and renewed.
+- **Does MLX get the GPU when the narration server runs as a LaunchAgent** rather than from a terminal?
 - **How does The New Atlantis's `/issues` page mark which articles belong to an edition?** This decides how the listing is read.

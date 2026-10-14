@@ -18,7 +18,7 @@ Brian wants new articles to appear in his podcast feed without starting a sessio
 
 Unattended means an agent reads untrusted web text with no one watching. Four boundaries make that acceptable:
 - **The agent's only tools are one MCP server's** (`narration`): get and edit the prepared text, record, check, look up phonemes, and finish. Its arguments are typed, and no tool takes a path. Bash, file and web tools are off, and the agent holds no publishing or push credentials.
-- **The agent runs away from Brian's files:** either under a separate macOS user, or in a container off the laptop. The spec proposes the container.
+- **The agent runs off the laptop,** in a container on the home server with restricted egress, away from Brian's files. The Mac runs only the MCP server, which is deterministic code.
 - **The runner's code fetches and publishes.** The agent never does.
 - **A deterministic gate runs before publishing.** It holds any recording whose text differs from the article in an undeclared way, or whose final check doesn't support the agent's claim.
 
