@@ -391,6 +391,39 @@ def test_a_sign_or_point_the_engine_reads_differently_is_a_change(article, prepa
     assert check(article, prepared, [])
 
 
+def test_a_sign_right_after_a_symbol_belongs_to_the_number():
+    assert words("$-5 £-5 €-5 #-5 $-3.50 $.5 #-.5 ±-5 x$-5 x-5 5-6 (5,-6)") == [
+        "$", "-5", "£", "-5", "€", "-5", "#", "-5", "$", "-3.50", "$", ".5", "#", "-.5",
+        "±", "-5", "x", "$", "-5", "x", "5", "5", "6", "5", "6"]
+
+
+@pytest.mark.parametrize("article, prepared", [
+    ("It is $5 now.", "It is $-5 now."),                 # fIv dɑləɹz -> mInəs fIv
+    ("It is £5 now.", "It is £-5 now."),                 # fIv pWndz -> mInəs fIv
+    ("It is €5 now.", "It is €-5 now."),                 # fIv jʊɹOz -> mInəs fIv jʊɹOz
+    ("It is #5 now.", "It is #-5 now."),                 # fIv -> mInəs fIv
+    ("It cost $3.50 today.", "It cost $-3.50 today."),   # θɹi dɑləɹz... -> mInəs θɹi dɑləɹz...
+    ("It is $5 now.", "It is $.5 now."),                 # fIv dɑləɹz -> fIv sɛnts
+    ("It is #5 now.", "It is #-.5 now."),                # fIv -> mInəs pYnt fIv
+    ("It is ±5 now.", "It is ±-5 now."),                 # plʌs ɔɹ mInəs fIv -> plʌs fIv
+    ("It is √5 now.", "It is √-5 now."),                 # skwɛɹ ɹut fIv -> skwɛɹ fIv
+    ("It is ÷5 now.", "It is ÷-5 now."),                 # dᵻvIdᵻd bI fIv -> dᵻvIdᵻd fIv
+])
+def test_a_sign_after_a_symbol_is_a_change(article, prepared):
+    assert check(article, prepared, [])
+
+
+@pytest.mark.parametrize("article, prepared", [
+    ("It is +5 now.", "It is +-5 now."),          # plʌs fIv both ways
+    ("It is ×5 now.", "It is ×-5 now."),          # tImz fIv both ways
+    ("It is 5 degrees.", "It is <-5 degrees."),   # fIv both ways
+])
+def test_a_minus_misaki_drops_after_some_marks_is_still_refused(article, prepared):
+    # misaki drops a minus glued after these marks, but the rule keeps it: a refusal
+    # that costs a retry, kept on purpose rather than modelling each mark.
+    assert check(article, prepared, [])
+
+
 def test_an_apostrophe_next_to_a_digit_is_dropped_as_misaki_drops_it():
     # misaki's subtokenizer skips a lone apostrophe next to a digit: 5'6 is 56 and
     # 1990's is 1990s. Two apostrophes split the number instead (5''6 is "five six").
@@ -484,7 +517,7 @@ def test_tilde_and_division_sign_are_spoken(article, prepared):
 
 @pytest.mark.parametrize("original, spoken, times, changed", [
     ("-5", "5", 21, 21), (".5", "5", 21, 21), ("3.5", "3 5", 11, 22),
-    ("1,000", "1 000", 11, 22), ("5'6", "5 6", 11, 22),
+    ("1,000", "1 000", 11, 22), ("5'6", "5 6", 11, 22), ("$5", "$-5", 21, 21),
 ])
 def test_signs_and_number_punctuation_are_not_respellings(original, spoken, times, changed):
     article = _repeat(f"Ok {original} fine.", times)
@@ -563,6 +596,14 @@ DIFFERENT = {
     "-5": ["--5", ".-5", "-(5", "(--5", "..5", "-.5", "(-.5)", "(5)", "~-5"],
     ".5": ["..5", "...5", "....5", "(..5", "-.5", "(-.5)", "-..5", "'..5'", "(5)"],
     "-.5": [".5", "-5", "..5", "(..5)", ".-.5", "-..5", "--.5", "(.5)", "(5)"],
+    "$5": ["$-5", "$.5", "$-.5"],
+    "£5": ["£-5", "£.5", "£-.5"],
+    "€5": ["€-5", "€.5", "€-.5"],
+    "#5": ["#-5", "#.5", "#-.5"],
+    "±5": ["±-5"],
+    "÷5": ["÷-5"],
+    "√5": ["√-5"],
+    "$3.50": ["$-3.50"],
     "5 6": ["5'6", "5’6"],
     "5'6": ["5 6", "5''6"],
     "3 4": ["3'4"],

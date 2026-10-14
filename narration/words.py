@@ -13,8 +13,9 @@ as misaki does.
 
 Each run of non-whitespace characters is split into tokens, following what
 misaki (the engine's grapheme-to-phoneme step) was checked to voice:
-- numbers. A "-", "." or "-." right before the digits is part of the number when
-  only silent characters come before it in the run and the character before it
+- numbers. A "-", "." or "-." right before the digits is part of the number at
+  the start of the run, right after a symbol ("$-5" is "minus five"), or when
+  only silent characters come before it in the run and the one right before it
   is not another "-" or ".": "-5", "(-5", ".5" and "-.5" are not "5", but
   "..5", ".-5" and "-(5" read "five", and the hyphen in "5-6" is a range. An
   apostrophe next to a digit is dropped, as misaki drops it: "5'6" is "56"
@@ -30,13 +31,16 @@ Known differences from the engine, left as they are: misaki sometimes drops a
 "-5" entirely (after a quote, a colon or an em dash, say), which the check
 can't predict; a range such as "10,000-20,000" comes out garbled, and so does
 "-$3.50"; case is folded, though a case change can change the speech ("us" and
-"US"), because the skill uses capitals to steer pronunciation. A few signs
-follow other rules in misaki than the one above: it says "minus" for a "-"
-after "$", "£", "€" or "#" ("$-5"), and drops the minus after "<", "^" or "‰".
-A silent mark glued to a year can switch it from "twenty twenty-three" to "two
-thousand twenty-three". And the check refuses some edits the engine reads the
-same way (a sentence-final "no." turned into "no,", "Dr." into "Dr", "1,000"
-into "1000"), since a refusal only costs a retry.
+"US"), because the skill uses capitals to steer pronunciation. misaki drops a
+minus glued after some marks ("<-5", "+-5" and "×-5" say "five", "plus five",
+"times five"), where the check keeps it: "5" to "<-5" is refused though it
+sounds the same, while "-5" to "<-5" and "×-5" to "× -5" pass though misaki
+says "minus" in only one of each. misaki reads "." then an apostrophe before digits
+(".'5") as "point five", which the check reads as "5". A silent mark glued to
+a year can switch misaki from "twenty twenty-three" to "two thousand
+twenty-three". And the check refuses some edits the engine reads the same way
+(a sentence-final "no." turned into "no,", "Dr." into "Dr", "1,000" into
+"1000"), since a refusal only costs a retry.
 
 A phonetic override is validated for shape (one displayed word, a pronunciation
 with a letter, no whitespace, limited length) but its phonemes are not checked
@@ -103,6 +107,7 @@ _ABBREVIATION = "|".join(re.escape(a[:-1])
 _TOKEN = re.compile(rf"{_NUMBER.pattern}|{_WORD}(?:\.{_WORD})+|(?i:{_ABBREVIATION})\.(?![^\W_])"
                     rf"|{_WORD}|\S")
 _SIGNS = ("-.", "-", ".")  # what may stand right before a number's digits, longest first
+_WORD_CHAR = re.compile(r"[^\W_]")
 _DIGIT_APOSTROPHE = re.compile(r"(?<=\d)'|'(?=\d)")
 
 
@@ -123,22 +128,35 @@ def _spoken_text(text: str) -> str:
     return text.replace("’", "'").replace("‘", "'").replace("[BREAK]", " ")
 
 
+def _sign_belongs(run: str, start: int) -> bool:
+    """Whether a "-", "." or "-." at run[start], right before a number's digits, is
+    part of the number: at the start of the run; right after a symbol, a character
+    that is a token of its own ("$-5" is "minus five"); or after silent characters
+    only, the last of them not another "-" or "." (misaki reads "(-5" and "…-5" as
+    "minus five", but "..5", ".-5" and "-(5" as "five")."""
+    if start == 0:
+        return True
+    before = run[start - 1]
+    if before not in SILENT and not _WORD_CHAR.match(before):
+        return True
+    return before not in "-." and all(ch in SILENT for ch in run[:start])
+
+
 def _run_tokens(run: str) -> list[str]:
-    """The tokens of one run of non-whitespace characters. A "-", "." or "-." right
-    before a number's digits is part of it when only silent characters come before it
-    in the run and the character before it is not another "-" or "." (misaki reads
-    "-5", "(-5" and "…-5" as "minus five", but "..5", ".-5" and "-(5" as "five")."""
-    lead = 0
-    while lead < len(run) and run[lead] in SILENT:
-        lead += 1
-    number = _NUMBER.match(run, lead) if lead else None
-    if number:
+    """The tokens of one run of non-whitespace characters."""
+    tokens, pos = [], 0
+    while pos < len(run):
         for sign in _SIGNS:
-            start = lead - len(sign)
-            if (start >= 0 and run.startswith(sign, start)
-                    and (start == 0 or run[start - 1] not in "-.")):
-                return [sign + number.group()] + _TOKEN.findall(run, number.end())
-    return _TOKEN.findall(run)
+            number = _NUMBER.match(run, pos + len(sign)) if run.startswith(sign, pos) else None
+            if number and _sign_belongs(run, pos):
+                tokens.append(sign + number.group())
+                pos = number.end()
+                break
+        else:
+            token = _TOKEN.match(run, pos)
+            tokens.append(token.group())
+            pos = token.end()
+    return tokens
 
 
 def _tokens(text: str) -> list[str]:
@@ -231,19 +249,24 @@ def _contains(seq: list[str], sub: list[str]) -> bool:
 
 def _squash(tokens: tuple) -> str:
     """The tokens run together, whitespace and silent characters dropped ("U.S."
-    and "US", "DOJ" and "D O J"), except where they stand before a digit with
-    nothing or a letter or digit before them, or after a digit before a letter or
-    digit. There a separator is kept, the punctuation itself if any: "55" and
-    "5 5", "1000" and "1 000", "3.5" and "3 5", "-5" and "5", "3rd" and "3 rd"
-    all sound different."""
+    and "US", "DOJ" and "D O J"), except a number's sign, which is spoken, and a
+    separator where a digit meets a digit or a letter, the punctuation itself if
+    any: "55" and "5 5", "1000" and "1 000", "3.5" and "3 5", "-5" and "5", "$-5"
+    and "$5", "3rd" and "3 rd" all sound different."""
+    chars = []  # (character, spoken although it is in SILENT)
+    for i, tok in enumerate(tokens):
+        unsigned = tok.lstrip("-.")
+        sign = len(tok) - len(unsigned) if unsigned[:1].isdigit() else 0
+        if i:
+            chars.append((" ", False))
+        chars += [(ch, k < sign) for k, ch in enumerate(tok)]
     squashed, gap = "", ""
-    for ch in " ".join(tokens):
-        if ch.isspace() or ch in SILENT:
+    for ch, spoken in chars:
+        if not spoken and (ch.isspace() or ch in SILENT):
             gap += ch
             continue
         before = squashed[-1:]
-        if gap and ((ch.isdigit() and (not before or before.isalnum()))
-                    or (before.isdigit() and ch.isalnum())):
+        if gap and before.isalnum() and ch.isalnum() and (before.isdigit() or ch.isdigit()):
             squashed += gap.strip() or " "
         squashed, gap = squashed + ch, ""
     return squashed
