@@ -3,21 +3,40 @@
 The prepared text must say exactly what the article says. Formatting,
 paragraph breaks, pauses and [BREAK] markers are invisible here.
 
-Both texts go through text_to_speech.clean_markdown_text, the function the CLI
-and KokoroEngine run before generating audio, and nothing else is done to the
-characters the engine will receive. In particular there is no Unicode
-normalisation, which the engine doesn't do either, so a fullwidth "＄" is a
-different token from "$". The only edits are to drop [BREAK] markers, read a
-phonetic override as its displayed word, and read a curly apostrophe as a
-straight one.
+Both texts are read as the engine receives them: text_to_speech.clean_markdown_text
+(the cleaning the CLI and KokoroEngine apply) and then prepare_for_tts (which
+turns "--" into "... " before generate_audio hands the text to misaki). Nothing
+else is done to the characters: no Unicode normalisation (a fullwidth "＄" is
+not "$"). The only other edits are to drop [BREAK] markers, read a phonetic
+override as its displayed word, and read a curly apostrophe as a straight one,
+as misaki does.
 
-Each run of non-whitespace characters is split into tokens: numbers (a "-" or
-"." right before a number belongs to it when only silent punctuation comes
-before it in the run: "-5", "(-5)" and ".5" are not "5", but the hyphen in "5-6"
-is a range), words, and every other character on its own. All of those must
-match, in order, on both sides, except the silent punctuation the engine
-doesn't voice and the skill may edit for pacing (SILENT: , . ; : ! ? quotes
-brackets dashes ellipses and a few marks that read as nothing).
+Each run of non-whitespace characters is split into tokens, following what
+misaki (the engine's grapheme-to-phoneme step) was checked to voice:
+- numbers. A "-", "." or "-." right before the digits is part of the number when
+  only silent characters come before it in the run and the character before it
+  is not another "-" or ".": "-5", "(-5", ".5" and "-.5" are not "5", but
+  "..5", ".-5" and "-(5" read "five", and the hyphen in "5-6" is a range. An
+  apostrophe next to a digit is dropped, as misaki drops it: "5'6" is "56"
+  ("fifty-six") and "1990's" is "1990s";
+- dotted words with no space ("example.com", "U.S.", "e.g."), one token each;
+- the dotted abbreviations of misaki's lexicon, which keep their dot
+  (DOTTED_ABBREVIATIONS: "No. 5" is "number five", "No 5" is "no five");
+- words, and every other character on its own.
+All of those must match, in order, on both sides, except the silent punctuation
+the engine doesn't voice and the skill may edit for pacing (SILENT).
+
+Known differences from the engine, left as they are: misaki sometimes drops a
+"-5" entirely (after a quote, a colon or an em dash, say), which the check
+can't predict; a range such as "10,000-20,000" comes out garbled, and so does
+"-$3.50"; case is folded, though a case change can change the speech ("us" and
+"US"), because the skill uses capitals to steer pronunciation. A few signs
+follow other rules in misaki than the one above: it says "minus" for a "-"
+after "$", "£", "€" or "#" ("$-5"), and drops the minus after "<", "^" or "‰".
+A silent mark glued to a year can switch it from "twenty twenty-three" to "two
+thousand twenty-three". And the check refuses some edits the engine reads the
+same way (a sentence-final "no." turned into "no,", "Dr." into "Dr", "1,000"
+into "1000"), since a refusal only costs a retry.
 
 A phonetic override is validated for shape (one displayed word, a pronunciation
 with a letter, no whitespace, limited length) but its phonemes are not checked
@@ -30,8 +49,9 @@ short, and across the whole text all of them together may add only a few words
 and change only a few words, however many times each is applied. Only a
 respelling is free of the second budget, and "respelling" is a syntactic
 notion here (same letters spaced differently, or two long, very alike words),
-not a judgment that the sounds are the same, so the published notes list every
-substitution and a reader can see what was changed.
+not a judgment that the sounds are the same, so respellings are capped by
+number too, and the published notes list every substitution and a reader can
+see what was changed.
 """
 from __future__ import annotations
 
@@ -42,7 +62,7 @@ import re
 from dataclasses import dataclass
 from typing import NamedTuple
 
-from text_to_speech import clean_markdown_text
+from text_to_speech import clean_markdown_text, prepare_for_tts
 
 MAX_SUBSTITUTIONS = 25
 MAX_SPOKEN_WORDS = 6         # per declaration
@@ -53,17 +73,37 @@ MIN_OVERRIDE_PHONEMES = 12   # a phonetic override's phonemes: at most this many
 OVERRIDE_PHONEMES_PER_CHAR = 3  # or this many per displayed character, whichever is larger
 RESPELLING_RATIO = 0.75      # single words this similar (and no more related) are respellings,
 MIN_RESPELLING_LETTERS = 6   # if both have at least this many letters
+MAX_RESPELLINGS = 50         # across the text: applications of respellings,
+RESPELLINGS_FRACTION = 0.05  # or this share of the article's words, whichever is larger
 _MAX_STATES_FACTOR = 50
 _RESYNC_WINDOW = 12          # words per side searched for where the texts agree again
 
 # Single characters that read as nothing, which the skill may add or drop for pacing.
-SILENT = frozenset(".,;:!?\"'‘’“”()[]{}-–—…~^<>÷‰_`")
+# Each was checked against misaki spaced, glued before and after a word, and before
+# and after a digit; "~" ("tilde") and "÷" ("divided by") are spoken, so they are not
+# here. Next to a digit "-", ".", "," and "'" can be spoken; the number rules cover that.
+SILENT = frozenset(".,;:!?\"'‘’“”()[]{}-–—…^<>‰_`")
+
+# Abbreviations misaki reads differently with their dot ("No." is "number"), so the dot
+# stays in the token: the keys with a dot in misaki 0.9.4's us_gold.json (Dr. Esq. Etc.
+# Mr. Mrs. Ms. No. etc.; us_silver.json has none), and "vs.", which
+# Lexicon.get_special_case reads as "versus". Case-folded, like every token.
+DOTTED_ABBREVIATIONS = frozenset({"dr.", "esq.", "etc.", "mr.", "mrs.", "ms.", "no.", "vs."})
 
 # ASCII only, as the engine's own link syntax is: [word](/phonemes/).
 _PHONETIC = re.compile(r"\[([^\]]+)\]\(/([^)]*)/\)")
-# A number (one glued to letters is a word instead), a word, or any other single character.
-_NUMBER = re.compile(r"\d+(?:[.,/:]\d+)*(?![^\W_])")
-_TOKEN = re.compile(_NUMBER.pattern + r"|[^\W_]+(?:'[^\W_]+)*|\S")
+_WORD = r"[^\W_]+(?:'[^\W_]+)*"
+# Digits, joined by number punctuation or an apostrophe, with any letters glued on
+# ("3.5", "5'6", "1990's", "3rd"): one token.
+_NUMBER = re.compile(r"\d+(?:[.,/:']\d+)*(?:'?" + _WORD + ")?")
+_ABBREVIATION = "|".join(re.escape(a[:-1])
+                         for a in sorted(DOTTED_ABBREVIATIONS, key=len, reverse=True))
+# A number, a dotted word ("example.com"), a dotted abbreviation, a word, or any
+# other single character.
+_TOKEN = re.compile(rf"{_NUMBER.pattern}|{_WORD}(?:\.{_WORD})+|(?i:{_ABBREVIATION})\.(?![^\W_])"
+                    rf"|{_WORD}|\S")
+_SIGNS = ("-.", "-", ".")  # what may stand right before a number's digits, longest first
+_DIGIT_APOSTROPHE = re.compile(r"(?<=\d)'|'(?=\d)")
 
 
 @dataclass(frozen=True)
@@ -79,25 +119,33 @@ def added_words_limit(source_words: int) -> int:
 
 def _spoken_text(text: str) -> str:
     """The text as the engine receives it, minus [BREAK] markers."""
-    return clean_markdown_text(text).replace("’", "'").replace("‘", "'").replace("[BREAK]", " ")
+    text = prepare_for_tts(clean_markdown_text(text))
+    return text.replace("’", "'").replace("‘", "'").replace("[BREAK]", " ")
 
 
 def _run_tokens(run: str) -> list[str]:
-    """The tokens of one run of non-whitespace characters. A "-" or "." right
-    before a number is part of it when only silent characters precede it in the run."""
+    """The tokens of one run of non-whitespace characters. A "-", "." or "-." right
+    before a number's digits is part of it when only silent characters come before it
+    in the run and the character before it is not another "-" or "." (misaki reads
+    "-5", "(-5" and "…-5" as "minus five", but "..5", ".-5" and "-(5" as "five")."""
     lead = 0
     while lead < len(run) and run[lead] in SILENT:
         lead += 1
-    number = _NUMBER.match(run, lead) if lead and run[lead - 1] in "-." else None
+    number = _NUMBER.match(run, lead) if lead else None
     if number:
-        return [run[lead - 1] + number.group()] + _TOKEN.findall(run, number.end())
+        for sign in _SIGNS:
+            start = lead - len(sign)
+            if (start >= 0 and run.startswith(sign, start)
+                    and (start == 0 or run[start - 1] not in "-.")):
+                return [sign + number.group()] + _TOKEN.findall(run, number.end())
     return _TOKEN.findall(run)
 
 
 def _tokens(text: str) -> list[str]:
-    """Case-folded tokens of already-cleaned text, silent punctuation dropped."""
-    return [tok.casefold() for run in text.split() for tok in _run_tokens(run)
-            if tok not in SILENT]
+    """Case-folded tokens of already-cleaned text, silent punctuation dropped. An
+    apostrophe next to a digit goes, as misaki drops it ("5'6" says "fifty-six")."""
+    return [_DIGIT_APOSTROPHE.sub("", tok).casefold()
+            for run in text.split() for tok in _run_tokens(run) if tok not in SILENT]
 
 
 def words(text: str) -> list[str]:
@@ -105,9 +153,9 @@ def words(text: str) -> list[str]:
 
     clean_markdown_text drops heading markers, emphasis markers, images and
     link URLs (keeping link text and phonetic overrides), exactly as the CLI
-    does for a .md file. prepare_for_tts only rewrites punctuation, so it
-    changes no words and isn't needed here. A phonetic override reduces to
-    its displayed word.
+    does for a .md file; prepare_for_tts then turns "--" into "... ", which
+    can change what misaki reads ("--5" says "five", "No -- 5" says "number
+    five"). A phonetic override reduces to its displayed word.
     """
     return _tokens(_PHONETIC.sub(r"\1", _spoken_text(text)))
 
@@ -182,22 +230,31 @@ def _contains(seq: list[str], sub: list[str]) -> bool:
 
 
 def _squash(tokens: tuple) -> str:
-    """The tokens run together, but kept apart where a digit meets a digit or a
-    letter, since "55" and "5 5", "1000" and "1 000", "3rd" and "3 rd" sound different."""
-    squashed = ""
-    for tok in tokens:
-        if squashed and squashed[-1].isalnum() and tok[0].isalnum() and (
-                squashed[-1].isdigit() or tok[0].isdigit()):
-            squashed += " "
-        squashed += tok
+    """The tokens run together, whitespace and silent characters dropped ("U.S."
+    and "US", "DOJ" and "D O J"), except where they stand before a digit with
+    nothing or a letter or digit before them, or after a digit before a letter or
+    digit. There a separator is kept, the punctuation itself if any: "55" and
+    "5 5", "1000" and "1 000", "3.5" and "3 5", "-5" and "5", "3rd" and "3 rd"
+    all sound different."""
+    squashed, gap = "", ""
+    for ch in " ".join(tokens):
+        if ch.isspace() or ch in SILENT:
+            gap += ch
+            continue
+        before = squashed[-1:]
+        if gap and ((ch.isdigit() and (not before or before.isalnum()))
+                    or (before.isdigit() and ch.isalnum())):
+            squashed += gap.strip() or " "
+        squashed, gap = squashed + ch, ""
     return squashed
 
 
 def _is_respelling(original: tuple, spoken: tuple) -> bool:
     """Whether `spoken` is `original` spelled differently, not another word.
 
-    Either the two are identical once whitespace and silent characters are gone
-    (letters, digits and symbols all kept; "DOJ" and "D O J"), or each is one
+    Either the two are identical once squashed (whitespace and silent characters
+    gone, except as separators and signs next to digits; "DOJ" and "D O J",
+    "U.S." and "US", but not "3.5" and "3 5" or "-5" and "5"), or each is one
     word, of letters only, at least MIN_RESPELLING_LETTERS long, that starts with
     the same letter, neither inside the other ("the" and "they", "legal" and
     "illegal"), and that are very alike ("Pengelley" and "Pengelly"). Shorter
@@ -226,27 +283,43 @@ def _changed_words(original: tuple, spoken: tuple) -> int:
     return max(len(original), len(spoken)) - head - tail
 
 
+def _respellings_limit(source_words: int) -> int:
+    """How many times, in all, respellings may be applied."""
+    return max(MAX_RESPELLINGS, math.ceil(RESPELLINGS_FRACTION * source_words))
+
+
 def _check_budgets(src, subs, pairs, applied):
     """Across the whole text, the applied substitutions may add only a few words
-    and change only a few (respellings don't count as changes)."""
+    and change only a few (respellings don't count as changes), and respellings
+    may be applied only so many times."""
     limit = added_words_limit(len(src))
     added = [n * max(0, len(sp) - len(o)) for n, (o, sp) in zip(applied, pairs)]
     if sum(added) > limit:
         headline = f"the substitutions add {sum(added)} words to the article's {len(src)}"
-        return [_over_budget(headline, limit, subs, applied, added, "adds")]
-    changed = [0 if _is_respelling(o, sp) else n * _changed_words(o, sp)
-               for n, (o, sp) in zip(applied, pairs)]
+        return [_over_budget(headline, limit, subs, applied, added, "and adds {} words")]
+    problems = []
+    respelling = [_is_respelling(o, sp) for o, sp in pairs]
+    changed = [0 if r else n * _changed_words(o, sp)
+               for r, n, (o, sp) in zip(respelling, applied, pairs)]
     if sum(changed) > limit:
         headline = f"the substitutions change {sum(changed)} of the article's {len(src)} words"
-        return [_over_budget(headline, limit, subs, applied, changed, "changes")]
-    return []
+        problems.append(_over_budget(headline, limit, subs, applied, changed,
+                                     "and changes {} words"))
+    respelled = [n if r else 0 for r, n in zip(respelling, applied)]
+    cap = _respellings_limit(len(src))
+    if sum(respelled) > cap:
+        headline = (f"respellings are applied {sum(respelled)} times in all, "
+                    f"in an article of {len(src)} words")
+        problems.append(_over_budget(headline, cap, subs, applied, respelled, "",
+                                     "Respell fewer places, or use phonetic overrides"))
+    return problems
 
 
-def _over_budget(headline, limit, subs, applied, counts, verb):
+def _over_budget(headline, limit, subs, applied, counts, what, advice="Shorten or drop them"):
     detail = "; ".join(
-        f"substitution {s.original!r} -> {s.spoken!r} is applied {n} time{'s' if n != 1 else ''} "
-        f"and {verb} {c} words" for s, n, c in zip(subs, applied, counts) if c)
-    return f"{headline}; the limit is {limit}: {detail}. Shorten or drop them"
+        f"substitution {s.original!r} -> {s.spoken!r} is applied {n} time{'s' if n != 1 else ''}"
+        + (" " + what.format(c) if what else "") for s, n, c in zip(subs, applied, counts) if c)
+    return f"{headline}; the limit is {limit}: {detail}. {advice}"
 
 
 class _Stuck(NamedTuple):
