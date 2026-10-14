@@ -181,15 +181,156 @@ def test_mismatch_message_names_a_missing_word():
     assert "'one [two] three'" in problems[0] and "'one [(nothing)] three'" in problems[0]
 
 
+# ---- every spoken character is a token; only the silent punctuation is free ----
+SPOKEN_SYMBOLS = "#*=/°×±¥¢©§√∞"
+
+
+def test_signs_and_leading_points_belong_to_the_number():
+    assert words("-5 .5 3.5 (-5) well-known 5-10") == [
+        "-5", ".5", "3.5", "5", "well", "known", "5", "10"]
+
+
+def test_any_other_symbol_is_a_token_of_its_own():
+    assert words("a # b *c* d/e ° ＄5") == ["a", "#", "b", "c", "d", "/", "e", "°", "＄", "5"]
+
+
+@pytest.mark.parametrize("article, prepared", [
+    ("It is 5 degrees.", "It is -5 degrees."),    # "minus five"
+    ("It is 5 degrees.", "It is .5 degrees."),    # "point five"
+    ("It is 3.5 degrees.", "It is -3.5 degrees."),
+    ("It is -5 degrees.", "It is 5 degrees."),
+])
+def test_signs_and_decimal_points_are_not_free(article, prepared):
+    assert check(article, prepared, [])
+
+
+@pytest.mark.parametrize("symbol", SPOKEN_SYMBOLS)
+def test_inserting_a_symbol_the_engine_voices_is_a_problem(symbol):
+    assert check("It cost five dollars today.", f"It cost five {symbol} dollars today.", [])
+    assert check("It cost five dollars today.", f"It cost five{symbol} dollars today.", [])
+
+
+@pytest.mark.parametrize("prepared", [
+    "It cost, five — dollars… today.",
+    "\u201cIt cost five dollars today.\u201d",
+    "\"It cost five dollars today.\"",
+    "It \u2018cost\u2019 five dollars today!",
+    "It cost five dollars today?",
+    "It cost (five) dollars; today:",
+    "It cost five - dollars ~ today ^ ... < > \u00f7 \u2030",
+    "It cost five dollars -- today.",
+])
+def test_the_punctuation_the_engine_does_not_voice_is_free(prepared):
+    assert check("It cost five dollars today.", prepared, []) == []
+
+
+def test_a_hyphen_is_silent():
+    assert check("A well-known fact.", "A well known fact.", []) == []
+    assert check("A well known fact.", "A well-known fact.", []) == []
+
+
+def test_fullwidth_forms_are_not_normalised_into_their_ascii_twins():
+    assert check("It cost $5.", "It cost \uff045.", [])
+    assert check("It cost \uff045.", "It cost $5.", [])
+
+
+# ---- override edge cases ----
+@pytest.mark.parametrize("slashes", ["///", "////"])
+def test_an_override_of_only_slashes_says_nothing(slashes):
+    problems = check("It went well mostly.", f"It went well [mostly]({slashes}).", [])
+    assert len(problems) == 1 and "empty" in problems[0]
+
+
+@pytest.mark.parametrize("phonemes", ["123", "---"])
+def test_override_phonemes_must_contain_a_letter(phonemes):
+    problems = check("It went well mostly.", f"It went well [mostly](/{phonemes}/).", [])
+    assert len(problems) == 1 and "letter" in problems[0]
+
+
+@pytest.mark.parametrize("prepared", [
+    "It went [well]\uff08/badly/\uff09.",
+    "It went \uff3bwell\uff3d(/badly/).",
+])
+def test_fullwidth_brackets_make_no_override(prepared):
+    # The engine reads these aloud ("slash badly slash"), so they are extra tokens.
+    assert check("It went well.", prepared, [])
+
+
+def test_a_fullwidth_override_in_a_longer_text_is_a_problem():
+    assert check("In Pennsylvania today.", "In [Pennsylvania]\uff08/x/\uff09 today.", [])
+
+
+# ---- which substitutions are respellings ----
+def _repeat(sentence, times):
+    return " ".join([sentence] * times)
+
+
+@pytest.mark.parametrize("original, spoken", [
+    ("not", "now"), ("the", "they"), ("legal", "illegal"), ("was", "wasn't"),
+    ("never", "ever"), ("he", "she"), ("man", "woman"), ("possible", "impossible"),
+    ("5", "55"), ("2019", "2091"), ("did not", "did"), ("not guilty", "guilty"),
+    ("40%", "40"), ("$5", "5"), ("Smith & Jones", "Smith Jones"),
+])
+def test_a_substitution_that_changes_the_meaning_is_not_a_respelling(original, spoken):
+    article = _repeat(f"Ok {original} fine.", 25)
+    prepared = _repeat(f"Ok {spoken} fine.", 25)
+    problems = check(article, prepared, [Substitution(original, spoken)])
+    assert len(problems) == 1
+    assert "applied 25 times" in problems[0] and "changes 25 words" in problems[0]
+
+
+@pytest.mark.parametrize("original, spoken, times", [
+    ("Pengelley", "Pengelly", 30),   # one token each, same letters apart from a slip
+    ("DOJ", "D O J", 10),            # identical once spaced letters are squashed
+    ("e-mail", "email", 25),         # a hyphen is silent
+    ("U.S.", "US", 25),
+])
+def test_respellings_are_not_changes(original, spoken, times):
+    article = _repeat(f"Ok {original} fine.", times)
+    prepared = _repeat(f"Ok {spoken} fine.", times)
+    assert check(article, prepared, [Substitution(original, spoken)]) == []
+
+
+@pytest.mark.parametrize("times, passes", [(10, True), (11, False)])
+def test_words_a_substitution_shares_with_the_article_are_not_counted(times, passes):
+    # "Pope Leo XIV" -> "Pope Leo the Fourteenth" changes the same two words as
+    # "XIV" -> "the Fourteenth": 2 per application, against a limit of 20.
+    article = _repeat("Pope Leo XIV spoke.", times)
+    prepared = article.replace("XIV", "the Fourteenth")
+    subs = [Substitution("Pope Leo XIV", "Pope Leo the Fourteenth")]
+    assert (check(article, prepared, subs) == []) is passes
+
+
+# ---- the unexplained span stops where a substitution applies again ----
+@pytest.mark.parametrize("tail", ["It went well.", "It went well today."])
+def test_the_unexplained_span_does_not_swallow_the_next_substitution(tail):
+    sentences = _repeat("Pengelley met the Pope.", 5)
+    article = f"{sentences} {tail} {sentences}"
+    prepared = article.replace("Pengelley", "Pengelly").replace("well", "badly")
+    problems = check(article, prepared, [Substitution("Pengelley", "Pengelly")])
+    assert len(problems) == 1
+    assert "[well]" in problems[0] and "[badly]" in problems[0]
+    assert "pengelley" not in problems[0] and "pengelly" not in problems[0]
+
+
 # ---- properties ----
 WORDS = ["the", "pope", "leo", "zoning", "alone", "court", "may", "end", "it", "and",
          "city", "in", "mars", "life", "is", "there", "neighbors", "xiv"]
 # Numbers with internal punctuation, each with spellings that change what is said.
-NUMBERS = {"3.5": ["3 5", "35", "3.6", "3.50"], "1,000": ["1 000", "1000", "1,001"],
-           "1/2": ["1 2", "12", "1/3"], "12:30": ["12 30", "1230", "12:31"]}
-SYMBOLS = ["%", "&", "@", "$", "£", "€"]
+NUMBERS = {"3.5": ["3 5", "35", "3.6", "3.50", "-3.5", ".5"],
+           "1,000": ["1 000", "1000", "1,001", "-1,000"],
+           "1/2": ["1 2", "12", "1/3", "-1/2"],
+           "12:30": ["12 30", "1230", "12:31", "-12:30"]}
+# Symbols the engine voices that are safe as stand-alone items in generated markdown.
+SYMBOLS = ["%", "&", "@", "$", "£", "€", "=", "/", "°", "×", "±", "¥", "¢", "©", "§", "√",
+           "∞"]
+# Everything that may be glued to a word, markdown-active characters and fullwidth forms included.
+GLUED = SYMBOLS + ["#", "*", "+", "\uff04", "\uff08", "\uff09", "\uff3b", "\uff3d"]
 VOCAB = WORDS + list(NUMBERS) + SYMBOLS  # what the generated articles are made of
-BAD_PHONEMES = ["", "a b", "ɛ" * 30]     # empty, whitespace, longer than any word here allows
+# Phonemes no override may carry: empty after stripping slashes, whitespace, too long, no letter.
+BAD_PHONEMES = ["", "/", "///", "a b", "ɛ" * 30, "123", "---"]
+# Overrides the engine would not take as overrides at all: it reads them aloud.
+FULLWIDTH_OVERRIDES = ["[{}]\uff08/x/\uff09", "\uff3b{}\uff3d(/x/)"]
 SPOKEN = ["fourteenth", "saint", "doctor", "number", "one"]
 paragraphs = st.lists(st.lists(st.sampled_from(VOCAB), min_size=1, max_size=10),
                       min_size=1, max_size=8)
@@ -278,8 +419,8 @@ def test_property_any_undeclared_word_change_fails(data, paras):
     elif kind == "replace":
         p[k] = data.draw(st.sampled_from([w for w in VOCAB if w != p[k]]))
     elif kind == "symbol":
-        # "40" -> "40%" or "$40": a symbol the engine speaks, glued to a word
-        symbol = data.draw(st.sampled_from(SYMBOLS + ["+"]))
+        # "40" -> "40%" or "$40": a symbol the engine voices, glued to a word
+        symbol = data.draw(st.sampled_from(GLUED))
         p[k] = p[k] + symbol if data.draw(st.booleans()) else symbol + p[k]
     elif kind == "number":
         # the article says "3.5"; the prepared text says "3 5", "35", ...
@@ -288,7 +429,8 @@ def test_property_any_undeclared_word_change_fails(data, paras):
         p.insert(k, data.draw(st.sampled_from(NUMBERS[number])))
     else:
         # the right word, wrapped in an override that could say anything
-        p[k] = f"[{p[k]}](/{data.draw(st.sampled_from(BAD_PHONEMES))}/)"
+        forms = [f"[{{}}](/{phonemes}/)" for phonemes in BAD_PHONEMES] + FULLWIDTH_OVERRIDES
+        p[k] = data.draw(st.sampled_from(forms)).format(p[k])
     mutated = [m for m in mutated if m]
     prepared = data.draw(formatted(mutated)) if mutated else ""
     assert check(render(source), prepared, []) != []

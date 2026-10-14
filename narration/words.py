@@ -3,21 +3,31 @@
 The prepared text must say exactly what the article says. Formatting,
 paragraph breaks, pauses and [BREAK] markers are invisible here.
 
-Both texts go through text_to_speech.clean_markdown_text, the same function
-the CLI and KokoroEngine run before generating audio, and are then reduced to
-a sequence of tokens that must match in order: words; numbers with internal
-punctuation ("3.5", "1,000", "1/2", "12:30"), each kept whole; and the symbols
-the engine speaks (% & + @ $ £ €), each its own token. So both texts must carry
-the same symbols and numbers in the same places. A phonetic override counts as
-its displayed word. The check does not verify that an override's phonemes say
-that word; it only bounds the override's shape (one displayed word, one
-pronunciation, of limited length), so an override cannot carry extra words.
+Both texts go through text_to_speech.clean_markdown_text, the function the CLI
+and KokoroEngine run before generating audio, and nothing else is done to the
+characters the engine will receive. In particular there is no Unicode
+normalisation, which the engine doesn't do either, so a fullwidth "＄" is a
+different token from "$". The only edits are to drop [BREAK] markers, read a
+phonetic override as its displayed word, and read a curly apostrophe as a
+straight one.
+
+Each run of non-whitespace characters is split into tokens: numbers (a leading
+"-" or "." at the start of the run is part of the number: "-5" and ".5" are not
+"5"), words, and every other character on its own. All of those must match,
+in order, on both sides, except the silent punctuation the engine doesn't
+voice and the skill may edit for pacing (SILENT: , . ; : ! ? quotes brackets
+dashes ellipses and a few marks that read as nothing).
+
+A phonetic override is validated for shape (one displayed word, a pronunciation
+with a letter, no whitespace, limited length) but its phonemes are not checked
+to say that word: an override can pronounce any single word. The server
+validates override provenance separately (Task 4).
 
 Every change to the words themselves must be declared as a Substitution, and
 declared substitutions are bounded so they can't carry new content: each one is
 short, and across the whole text all of them together may add only a few words
-and change only a few words (respellings, which only reshape a word's letters,
-don't count as changes), however many times each is applied.
+and change only a few words, however many times each is applied. Only a
+respelling (the same sounds spelled differently) is free of the second budget.
 """
 from __future__ import annotations
 
@@ -25,7 +35,6 @@ import difflib
 import heapq
 import math
 import re
-import unicodedata
 from dataclasses import dataclass
 from typing import NamedTuple
 
@@ -38,12 +47,21 @@ MAX_ADDED_WORDS = 20         # across the text: words all the applied substituti
 ADDED_WORDS_FRACTION = 0.02  # or this share of the article's words, whichever is larger
 MIN_OVERRIDE_PHONEMES = 12   # a phonetic override's phonemes: at most this many characters,
 OVERRIDE_PHONEMES_PER_CHAR = 3  # or this many per displayed character, whichever is larger
-RESPELLING_RATIO = 0.6       # a substitution this similar (letters and digits only) is a respelling
+RESPELLING_RATIO = 0.75      # single words this similar (and no more related) are respellings
 _MAX_STATES_FACTOR = 50
+_RESYNC_WINDOW = 12          # words per side searched for where the texts agree again
 
+# Single characters that read as nothing, which the skill may add or drop for pacing.
+SILENT = frozenset(".,;:!?\"'‘’“”()[]{}-–—…~^<>÷‰_`")
+
+# ASCII only, as the engine's own link syntax is: [word](/phonemes/).
 _PHONETIC = re.compile(r"\[([^\]]+)\]\(/([^)]*)/\)")
-# A spoken symbol, a number with internal punctuation, or a word.
-_TOKEN = re.compile(r"[%&+@$£€]|\d+(?:[.,/:]\d+)+|[^\W_]+(?:'[^\W_]+)*")
+# A number (a leading - or . counts only at the start of a run, and a number
+# glued to letters is a word), a word, or any other single character.
+_TOKEN = re.compile(r"\A[-.]?\d+(?:[.,/:]\d+)*(?![^\W_])"
+                    r"|\d+(?:[.,/:]\d+)*(?![^\W_])"
+                    r"|[^\W_]+(?:'[^\W_]+)*"
+                    r"|\S")
 
 
 @dataclass(frozen=True)
@@ -59,13 +77,17 @@ def added_words_limit(source_words: int) -> int:
 
 def _spoken_text(text: str) -> str:
     """The text as the engine receives it, minus [BREAK] markers."""
-    t = clean_markdown_text(text)
-    t = unicodedata.normalize("NFKC", t).replace("’", "'").replace("‘", "'")
-    return t.replace("[BREAK]", " ")
+    return clean_markdown_text(text).replace("’", "'").replace("‘", "'").replace("[BREAK]", " ")
+
+
+def _tokens(text: str) -> list[str]:
+    """Case-folded tokens of already-cleaned text, silent punctuation dropped."""
+    return [tok.casefold() for run in text.split() for tok in _TOKEN.findall(run)
+            if tok not in SILENT]
 
 
 def words(text: str) -> list[str]:
-    """The tokens the engine will speak, case-folded: words, numbers and spoken symbols.
+    """The tokens the engine will speak, case-folded: words, numbers and symbols.
 
     clean_markdown_text drops heading markers, emphasis markers, images and
     link URLs (keeping link text and phonetic overrides), exactly as the CLI
@@ -73,7 +95,7 @@ def words(text: str) -> list[str]:
     changes no words and isn't needed here. A phonetic override reduces to
     its displayed word.
     """
-    return [w.casefold() for w in _TOKEN.findall(_PHONETIC.sub(r"\1", _spoken_text(text)))]
+    return _tokens(_PHONETIC.sub(r"\1", _spoken_text(text)))
 
 
 def check(source: str, prepared: str, substitutions: list[Substitution]) -> list[str]:
@@ -89,7 +111,7 @@ def check(source: str, prepared: str, substitutions: list[Substitution]) -> list
         return problems + ["could not align the prepared text with the article "
                            "(too many alternatives)"]
     if isinstance(aligned, _Stuck):
-        return problems + [_describe(src, prep, aligned)]
+        return problems + [_describe(src, prep, pairs, aligned)]
     return problems + _check_budgets(src, substitutions, pairs, aligned)
 
 
@@ -97,15 +119,17 @@ def _check_overrides(prepared: str) -> list[str]:
     """Each phonetic override is one displayed word with one bounded pronunciation."""
     problems = []
     for m in _PHONETIC.finditer(_spoken_text(prepared)):
-        shown, phonemes = m.group(1).strip(), m.group(2)
+        shown, phonemes = m.group(1).strip(), m.group(2).strip("/")  # as the engine reads it
         why = []
-        if len(_TOKEN.findall(shown)) != 1:
+        if len(_tokens(shown)) != 1:
             why.append("the displayed text must be exactly one word")
         if not phonemes:
             why.append("the phonemes are empty")
         else:
             if re.search(r"\s", phonemes):
                 why.append("the phonemes contain whitespace (an override pronounces one word)")
+            if not any(ch.isalpha() for ch in phonemes):
+                why.append("the phonemes contain no letter")
             cap = max(MIN_OVERRIDE_PHONEMES, OVERRIDE_PHONEMES_PER_CHAR * len(shown))
             if len(phonemes) > cap:
                 why.append(f"the phonemes are {len(phonemes)} characters; "
@@ -144,15 +168,33 @@ def _contains(seq: list[str], sub: list[str]) -> bool:
 
 
 def _is_respelling(original: tuple, spoken: tuple) -> bool:
-    """Whether `spoken` only reshapes the letters and digits of `original`."""
-    a, b = _squash(original), _squash(spoken)
-    if not (a and b):
+    """Whether `spoken` is the same sounds as `original`, spelled differently.
+
+    Either the two are identical once whitespace and silent characters are gone
+    (letters, digits and symbols all kept: "DOJ" and "D O J"), or each is one
+    word, of letters only, that starts with the same letter, neither inside the
+    other ("not" and "now" differ in meaning, "the" and "they" or "legal" and
+    "illegal" are different words), and that are very alike."""
+    if "".join(original) == "".join(spoken):
+        return True
+    if len(original) != 1 or len(spoken) != 1:
         return False
-    return difflib.SequenceMatcher(None, a, b, autojunk=False).ratio() >= RESPELLING_RATIO
+    a, b = original[0], spoken[0]
+    return (a.isalpha() and b.isalpha() and a[0] == b[0] and a not in b and b not in a
+            and difflib.SequenceMatcher(None, a, b, autojunk=False).ratio() >= RESPELLING_RATIO)
 
 
-def _squash(tokens: tuple) -> str:
-    return "".join(ch for ch in "".join(tokens) if ch.isalnum())
+def _changed_words(original: tuple, spoken: tuple) -> int:
+    """Words that differ per application: what is left of each side once the
+    tokens they share at the start and end are set aside."""
+    shortest = min(len(original), len(spoken))
+    head = 0
+    while head < shortest and original[head] == spoken[head]:
+        head += 1
+    tail = 0
+    while tail < shortest - head and original[-1 - tail] == spoken[-1 - tail]:
+        tail += 1
+    return max(len(original), len(spoken)) - head - tail
 
 
 def _check_budgets(src, subs, pairs, applied):
@@ -163,7 +205,7 @@ def _check_budgets(src, subs, pairs, applied):
     if sum(added) > limit:
         headline = f"the substitutions add {sum(added)} words to the article's {len(src)}"
         return [_over_budget(headline, limit, subs, applied, added, "adds")]
-    changed = [0 if _is_respelling(o, sp) else n * max(len(o), len(sp))
+    changed = [0 if _is_respelling(o, sp) else n * _changed_words(o, sp)
                for n, (o, sp) in zip(applied, pairs)]
     if sum(changed) > limit:
         headline = f"the substitutions change {sum(changed)} of the article's {len(src)} words"
@@ -179,10 +221,12 @@ def _over_budget(headline, limit, subs, applied, counts, verb):
 
 
 class _Stuck(NamedTuple):
-    """Where the alignment got furthest: words src[:i] and prep[:j] are explained,
-    and the next words differ with no declared substitution to account for it."""
+    """Where the alignment got furthest: src[:i] and prep[:j] are explained, and
+    the next words differ with no declared substitution to account for it. The
+    last `plain` words explained were equal words, not substitutions."""
     i: int
     j: int
+    plain: int
 
 
 def _align(src, prep, pairs):
@@ -226,22 +270,55 @@ def _align(src, prep, pairs):
             if (ni, nj) not in best or cost + c < best[(ni, nj)][0]:
                 best[(ni, nj)] = (cost + c, (i, j), k)
                 heapq.heappush(heap, (ni, nj))
-    return _Stuck(*furthest)
+    plain, state = 0, furthest
+    while state != (0, 0) and best[state][2] is None:
+        plain, state = plain + 1, best[state][1]
+    return _Stuck(*furthest, plain)
 
 
-def _describe(src, prep, stuck, context=3, max_words=12):
-    """The first span that no equal word or declared substitution explains, with
-    a few words of context on each side, from both texts."""
-    ops = difflib.SequenceMatcher(None, src[stuck.i:], prep[stuck.j:], autojunk=False).get_opcodes()
-    _, i1, i2, j1, j2 = next(op for op in ops if op[0] != "equal")
-    article = _excerpt(src, stuck.i + i1, stuck.i + i2, context, max_words)
-    prepared = _excerpt(prep, stuck.j + j1, stuck.j + j2, context, max_words)
-    return (f"near word {stuck.i + i1 + 1} of the article: "
-            f"the article reads '{article}' but the prepared text reads '{prepared}'")
+def _substitution_at(src, prep, pairs, i, j) -> bool:
+    return any(tuple(src[i:i + len(o)]) == o and tuple(prep[j:j + len(sp)]) == sp
+               for o, sp in pairs)
 
 
-def _excerpt(ws, start, end, context, max_words):
-    """ws[start:end] in brackets, with `context` words on each side."""
-    span = " ".join(ws[start:end][:max_words]) + (" ..." if end - start > max_words else "")
-    parts = ws[max(0, start - context):start] + [f"[{span or '(nothing)'}]"] + ws[end:end + context]
-    return " ".join(parts)
+def _explained_at(src, prep, pairs, i, j) -> bool:
+    """Whether an equal word or a declared substitution accounts for the texts here
+    (or both texts have ended)."""
+    if i == len(src) and j == len(prep):
+        return True
+    if i < len(src) and j < len(prep) and src[i] == prep[j]:
+        return True
+    return _substitution_at(src, prep, pairs, i, j)
+
+
+def _describe(src, prep, pairs, stuck, context=3, window=_RESYNC_WINDOW):
+    """The first span that no equal word or declared substitution explains, ending
+    where the texts agree again, with a few plain words of context each side."""
+    i, j = stuck.i, stuck.j
+    span = None
+    for total in range(1, 2 * window + 1):
+        for a in range(max(0, total - window), min(window, total) + 1):
+            b = total - a
+            if (i + a <= len(src) and j + b <= len(prep)
+                    and _explained_at(src, prep, pairs, i + a, j + b)):
+                span = a, b
+                break
+        if span:
+            break
+    truncated = span is None
+    a, b = span or (min(window, len(src) - i), min(window, len(prep) - j))
+    before = src[i - min(context, stuck.plain):i]
+    after = []
+    p, q = i + a, j + b
+    while (len(after) < context and p < len(src) and q < len(prep) and src[p] == prep[q]
+           and not _substitution_at(src, prep, pairs, p, q)):
+        after.append(src[p])
+        p, q = p + 1, q + 1
+    return (f"near word {max(1, min(i + 1, len(src)))} of the article: "
+            f"the article reads '{_excerpt(before, src[i:i + a], after, truncated)}' "
+            f"but the prepared text reads '{_excerpt(before, prep[j:j + b], after, truncated)}'")
+
+
+def _excerpt(before, span, after, truncated):
+    inner = " ".join(span) + (" ..." if truncated else "")
+    return " ".join([*before, f"[{inner or '(nothing)'}]", *after])
