@@ -1,3 +1,5 @@
+import time
+
 import pytest
 from hypothesis import given, settings, strategies as st
 
@@ -40,8 +42,10 @@ def test_a_short_substitution_applied_everywhere_cannot_inject_many_words():
     article = " ".join(["The dog saw the cat."] * 15)
     prepared = article.replace("the ", "buy crypto now the ").replace("The ", "Buy crypto now the ")
     problems = check(article, prepared, [Substitution("the", "buy crypto now the")])
+    # 165 words against 75: more than any substitutions could add, so this is refused
+    # before alignment (which used to report "applied 30 times ... adds 90 words").
     assert len(problems) == 1
-    assert "applied 30 times" in problems[0] and "adds 90 words" in problems[0] and "limit is 20" in problems[0]
+    assert "165 words" in problems[0] and "75" in problems[0] and "at most 20" in problems[0]
 
 
 def test_respellings_and_a_few_expansions_stay_within_the_added_words_limit():
@@ -77,9 +81,10 @@ def test_heading_markers_and_link_urls_are_not_words():
 
 # ---- symbols and numbers the engine speaks ----
 def test_spoken_symbols_and_numbers_are_words():
+    # A run with a symbol in it is one token.
     assert words("Up 3.5% to $1,000 at 12:30, 1/2 & £2 or €3 @ 5 + 1") == [
-        "up", "3.5", "%", "to", "$", "1,000", "at", "12:30", "1/2", "&", "£", "2",
-        "or", "€", "3", "@", "5", "+", "1"]
+        "up", "3.5%", "to", "$1,000", "at", "12:30", "1/2", "&", "£2",
+        "or", "€3", "@", "5", "+", "1"]
 
 
 def test_a_number_glued_to_letters_is_one_word():
@@ -198,8 +203,8 @@ def test_a_hyphen_between_digits_is_a_range_not_a_sign():
     assert check("They sold 5-6 items.", "They sold 5 6 items.", []) == []
 
 
-def test_any_other_symbol_is_a_token_of_its_own():
-    assert words("a # b *c* d/e ° ＄5") == ["a", "#", "b", "c", "d", "/", "e", "°", "＄", "5"]
+def test_any_other_symbol_is_a_token_with_its_run():
+    assert words("a # b *c* d/e ° ＄5") == ["a", "#", "b", "c", "d/e", "°", "＄5"]
 
 
 @pytest.mark.parametrize("article, prepared", [
@@ -393,8 +398,8 @@ def test_a_sign_or_point_the_engine_reads_differently_is_a_change(article, prepa
 
 def test_a_sign_right_after_a_symbol_belongs_to_the_number():
     assert words("$-5 £-5 €-5 #-5 $-3.50 $.5 #-.5 ±-5 x$-5 x-5 5-6 (5,-6)") == [
-        "$", "-5", "£", "-5", "€", "-5", "#", "-5", "$", "-3.50", "$", ".5", "#", "-.5",
-        "±", "-5", "x", "$", "-5", "x", "5", "5", "6", "5", "6"]
+        "$-5", "£-5", "€-5", "#-5", "$-3.50", "$.5", "#-.5", "±-5", "x$-5",
+        "x", "5", "5", "6", "5", "-6"]
 
 
 @pytest.mark.parametrize("article, prepared", [
@@ -417,6 +422,7 @@ def test_a_sign_after_a_symbol_is_a_change(article, prepared):
     ("It is +5 now.", "It is +-5 now."),          # plʌs fIv both ways
     ("It is ×5 now.", "It is ×-5 now."),          # tImz fIv both ways
     ("It is 5 degrees.", "It is <-5 degrees."),   # fIv both ways
+    ("It rose,5 now.", "It rose,-5 now."),        # ɹOz fIv both ways
 ])
 def test_a_minus_misaki_drops_after_some_marks_is_still_refused(article, prepared):
     # misaki drops a minus glued after these marks, but the rule keeps it: a refusal
@@ -456,14 +462,26 @@ def test_an_apostrophe_misaki_drops_is_free(article, prepared):
 def test_the_dotted_abbreviations_are_misakis():
     # misaki 0.9.4's us_gold.json has exactly eight keys with a dot: Dr. Esq. Etc. Mr.
     # Mrs. Ms. No. etc. (us_silver.json has none), and Lexicon.get_special_case reads
-    # vs. as "versus".
-    assert DOTTED_ABBREVIATIONS == {"dr.", "esq.", "etc.", "mr.", "mrs.", "ms.", "no.", "vs."}
+    # vs. as "versus". They are matched case-sensitively.
+    assert DOTTED_ABBREVIATIONS == {
+        "Dr.", "Esq.", "Etc.", "Mr.", "Mrs.", "Ms.", "No.", "etc.", "vs."}
 
 
 def test_a_dotted_abbreviation_keeps_its_dot():
     assert words("Dr. ESQ. etc. Mr. Mrs. Ms. No. vs. Dr Esq no No.5 nos. No...") == [
-        "dr.", "esq.", "etc.", "mr.", "mrs.", "ms.", "no.", "vs.", "dr", "esq", "no",
+        "dr.", "esq", "etc.", "mr.", "mrs.", "ms.", "no.", "vs.", "dr", "esq", "no",
         "no.5", "nos", "no."]
+    assert words("No. no. Dr. dr. ETC. Etc. etc.") == [
+        "no.", "no", "dr.", "dr", "etc", "etc.", "etc."]
+
+
+@pytest.mark.parametrize("article, prepared", [
+    ("He said no, then left.", "He said no -- then left."),   # "no... then": nO both ways
+    ("He said no. Then left.", "He said no -- then left."),   # nO both ways
+    ("He said no.", "He said no,"),                           # nO both ways
+])
+def test_a_lowercase_no_is_plain_no(article, prepared):
+    assert check(article, prepared, []) == []
 
 
 @pytest.mark.parametrize("article, prepared", [
@@ -524,6 +542,131 @@ def test_signs_and_number_punctuation_are_not_respellings(original, spoken, time
     prepared = _repeat(f"Ok {spoken} fine.", times)
     problems = check(article, prepared, [Substitution(original, spoken)])
     assert len(problems) == 1 and f"changes {changed} words" in problems[0]
+
+
+# ---- a sign after any mark; a run with a symbol is one token (checked against misaki) ----
+def test_a_sign_belongs_to_the_number_after_any_mark_that_is_not_part_of_a_word():
+    # "'-5" is a quote mark before the sign; in "x'-5" the apostrophe is part of the word.
+    assert words("fell(-5%) x(-5) 5;-6 (5,-6) '-5 x'-5 rock'-5 x-5 5-5 ..5 .-5") == [
+        "fell-5%", "x", "-5", "5", "-6", "5", "-6", "-5", "x", "5", "rock", "5",
+        "x", "5", "5", "5", "5", "5"]
+
+
+@pytest.mark.parametrize("article, prepared", [
+    ("Costs fell 5% today.", "Costs fell(-5%) today."),   # fɛl fIv pəɹsɛnt -> fɛl mInəs fIv pəɹsɛnt
+    ("It is $5 now.", "It is $(-5) now."),                # fIv dɑləɹz -> mInəs fIv
+    ("Use 5, 6 now.", "Use 5;-6 now."),                   # fIv sɪks -> fIv mInəs sɪks
+    ("Use x(5) now.", "Use x(-5) now."),                  # ɛks fIv -> ɛks mInəs fIv
+] + [("It fell 5 today.", f"It fell{mark}-5 today.")      # fɛl fIv -> fɛl mInəs fIv
+     for mark in "(\"…;!?[{“”—)]}"])
+def test_a_sign_after_a_mark_glued_to_a_word_is_a_change(article, prepared):
+    assert check(article, prepared, [])
+
+
+def test_a_run_with_a_symbol_is_one_token():
+    assert words("$(-5) $-5 fell(-5%) fell(5%) 3-4% 3–4% $5. (5%) 5%, a-b$ +/-5% ≤-5") == [
+        "$-5", "$-5", "fell-5%", "fell 5%", "3 4%", "3 4%", "$5", "5%", "5%", "a b$",
+        "+/-5%", "≤-5"]
+
+
+@pytest.mark.parametrize("article, prepared", [
+    ("It is ≤ -5 now.", "It is ≤-5 now."),         # lɛs ɔɹ ikwᵊl tʊ mInəs fIv -> lɛs fIv
+    ("It is # 1 now.", "It is #1 now."),           # hæʃ wʌn -> wʌn
+    ("It is +/ -5% now.", "It is +/-5% now."),     # plʌs mInəs fIv pəɹsɛnt -> plʌs fIv pəɹsɛnt
+    ("It rose 34% now.", "It rose 3-4% now."),     # θɜɹTi fɔɹ pəɹsɛnt -> θɹi fɔɹ pəɹsɛnt
+    ("It is 56$ now.", "It is 5-6$ now."),         # fɪfti sɪks dɑləɹ -> fIvsɪks
+    ("It is $5 now.", "It is $\n\n[BREAK]\n\n5 now."),  # fIv dɑləɹz -> ɪt ɪz | fIv nW
+])
+def test_changing_the_spacing_around_a_symbol_is_a_change(article, prepared):
+    assert check(article, prepared, [])
+
+
+@pytest.mark.parametrize("article, prepared", [
+    ("It is $.5 now.", "It is $ .5 now."),   # fIv sɛnts both ways
+    ("It is 5$ now.", "It is 5 $ now."),     # fIv dɑləɹ both ways
+])
+def test_spacing_around_a_symbol_is_refused_even_where_misaki_reads_it_alike(article, prepared):
+    assert check(article, prepared, [])
+
+
+@pytest.mark.parametrize("article, prepared", [
+    ("It cost $5.", "It cost $5"),                        # fIv dɑləɹz both ways
+    ("It rose (5%) now.", "It rose 5% now."),             # fIv pəɹsɛnt both ways
+    ("It rose 5%, now.", "It rose 5% now."),
+    ("It is $(-5) now.", "It is $-5 now."),               # mInəs fIv both ways
+    ("It rose 3-4% now.", "It rose 3–4% now."),           # θɹi fɔɹ pəɹsɛnt both ways
+])
+def test_silent_marks_in_a_run_with_a_symbol_are_free(article, prepared):
+    assert check(article, prepared, []) == []
+
+
+# ---- overrides glued to their neighbours (checked against misaki) ----
+@pytest.mark.parametrize("article, prepared, override", [
+    # misaki: "pɛnʤɛli lA kAm": "family" is gone
+    ("The Pengelley family came.", "The Pengel[ley](/lˈA/) family came.", "[ley](/lˈA/)"),
+    # misaki: "mək fæmᵊli": "Donald" is gone
+    ("The McDonald family came.", "The [Mc](/mək/)Donald family came.", "[Mc](/mək/)"),
+    # misaki: "ɪt ɪz fIv": "now" is gone
+    ("It is -5 now.", "It is -[5](/fˈIv/) now.", "[5](/fˈIv/)"),
+])
+def test_an_override_glued_to_a_word_or_a_sign_is_refused(article, prepared, override):
+    problems = check(article, prepared, [])
+    assert any(override in p and "glued" in p for p in problems)
+
+
+@pytest.mark.parametrize("article, prepared", [
+    ("He said 'Pengelley' loudly.", "He said '[Pengelley](/pɛnʤˈɛli/)' loudly."),  # pɛnʤɛli lWdli
+    ("It is (5) now.", "It is ([5](/fˈIv/)) now."),                                 # fIv nW
+])
+def test_an_override_inside_quotes_or_brackets_is_fine(article, prepared):
+    assert check(article, prepared, []) == []
+
+
+# ---- bounds that keep the check fast ----
+def test_a_prepared_text_far_longer_than_the_article_is_refused_at_once():
+    problems = check("A short article.", "word " * 3000, [])
+    assert problems == [
+        "the prepared text is far longer than the article: 15000 characters against 16"]
+
+
+def test_more_words_than_substitutions_could_add_is_refused_before_aligning():
+    problems = check("one two three", "one two three" + " x" * 30, [])
+    assert len(problems) == 1 and "33 words" in problems[0] and "at most 20" in problems[0]
+
+
+def test_a_spoken_word_longer_than_64_characters_is_refused():
+    problems = check(ARTICLE, ARTICLE, [Substitution("Pope", "P" + "o" * 64)])
+    assert any("longer than 64 characters" in p for p in problems)
+
+
+def test_an_override_word_longer_than_64_characters_is_refused():
+    long_word = "w" * 65
+    problems = check(f"A {long_word} b.", f"A [{long_word}](/ɛɛɛ/) b.", [])
+    assert any("longer than 64 characters" in p for p in problems)
+
+
+def test_words_longer_than_64_letters_are_never_respellings():
+    # 66 and 64 letters, same first letter, neither inside the other, ratio 0.95: a
+    # respelling by rule (ii) if they were short enough to compare.
+    original, spoken = "a" + "b" * 64 + "c", "a" + "b" * 61 + "dd"
+    article = _repeat(f"Ok {original} fine.", 25)
+    prepared = _repeat(f"Ok {spoken} fine.", 25)
+    problems = check(article, prepared, [Substitution(original, spoken)])
+    assert len(problems) == 1 and "changes 25 words" in problems[0]
+
+
+@pytest.mark.parametrize("make", [
+    lambda n: "\t" * n, lambda n: " " * n, lambda n: "\n" * n, lambda n: "[" * n,
+    lambda n: "![" * (n // 2), lambda n: "[a](/" * (n // 5), lambda n: "\n " * (n // 2),
+    lambda n: "a --\t" * (n // 5),
+])
+def test_long_runs_are_checked_in_linear_time(make):
+    # Each of these took seconds at 20,000 characters (quadratic regexes); at 200,000 a
+    # quadratic step would take minutes. An article as long keeps the length guard off.
+    text = make(200_000)
+    start = time.perf_counter()
+    check(text, text, [])
+    assert time.perf_counter() - start < 5
 
 
 # ---- respellings are capped too ----
@@ -588,6 +731,12 @@ SAME = {
     "Ms. Smith": ["Ms. -- Smith", "Ms... Smith", "Ms., Smith"],
     "Dr. Smith": ["Dr. -- Smith", "Dr... Smith"],
     "example.com": ["example.com,", "(example.com)", "example.com --"],
+    # a run with a symbol is one token; its silent marks are free
+    "3-4%": ["3–4%", "(3-4%)", "3-4%,"],
+    "5%": ["(5%)", '"5%"'],
+    # a sign after a mark that is not part of a word
+    "x(-5)": ["x (-5)", "x(-5),"],
+    "5;-6": ["5; -6"],
 }
 # ...and to spellings it reads differently (same check: different in all three places).
 DIFFERENT = {
@@ -596,7 +745,7 @@ DIFFERENT = {
     "-5": ["--5", ".-5", "-(5", "(--5", "..5", "-.5", "(-.5)", "(5)", "~-5"],
     ".5": ["..5", "...5", "....5", "(..5", "-.5", "(-.5)", "-..5", "'..5'", "(5)"],
     "-.5": [".5", "-5", "..5", "(..5)", ".-.5", "-..5", "--.5", "(.5)", "(5)"],
-    "$5": ["$-5", "$.5", "$-.5"],
+    "$5": ["$-5", "$.5", "$-.5", "$(-5)", "$[BREAK]5"],
     "£5": ["£-5", "£.5", "£-.5"],
     "€5": ["€-5", "€.5", "€-.5"],
     "#5": ["#-5", "#.5", "#-.5"],
@@ -613,7 +762,19 @@ DIFFERENT = {
     "e.g.": ["eg"],
     "a.m.": ["am"],
     "example.com": ["example com"],
+    # a sign after a mark glued to a word
+    "fell 5%": ["fell(-5%)"],
+    "5, 6": ["5;-6"],
+    "x(5)": ["x(-5)"],
+    # spacing around a symbol
+    "≤ -5": ["≤-5"],
+    "+/ -5%": ["+/-5%"],
+    "34%": ["3-4%"],
+    "56$": ["5-6$"],
 }
+# Spacing changes around a symbol that misaki reads alike in some sentences: refused all
+# the same (a run with a symbol is one token), the conservative side.
+SPACED = {"$5": ["$ 5"], "5%": ["5 %"], "$.5": ["$ .5"], "5$": ["5 $"]}
 VOCAB = WORDS + list(NUMBERS) + SYMBOLS + list(SAME)  # what the generated articles are made of
 # Phonemes no override may carry: empty after stripping slashes, whitespace, no letter
 # (and too long for the word: see the override mutation).
@@ -626,7 +787,9 @@ paragraphs = st.lists(st.lists(st.sampled_from(VOCAB), min_size=1, max_size=10),
 
 
 def render(paras):
-    return "\n\n".join(" ".join(p).capitalize() + "." for p in paras)
+    # Capitalise the first letter only: str.capitalize() would lowercase "No." (a dotted
+    # abbreviation, case-sensitive) to "no." (plain "no").
+    return "\n\n".join((lambda t: t[:1].upper() + t[1:])(" ".join(p)) + "." for p in paras)
 
 
 @st.composite
@@ -645,7 +808,7 @@ def formatted(draw, paras):
             rendered = []
             for w in c:
                 choice = draw(st.integers(0, 5))
-                if choice == 0 and " " not in w:
+                if choice == 0 and len(words(w)) == 1:  # an override shows one word
                     rendered.append(f"[{w}](/fəˈnɛt/)")
                 elif choice == 1:
                     rendered.append(w + ",")
@@ -694,6 +857,17 @@ def test_property_allowed_edits_and_declared_substitutions_pass(data, paras):
     assert check(render(paras), prepared, subs) == []
 
 
+def _glued_overrides(w):
+    """Overrides glued into `w` at a point between two letters or digits, or between a
+    sign and the digits it belongs to; the words read the same, only the glue is wrong."""
+    cuts = [j for j in range(1, len(w)) if w[j - 1].isalnum() and w[j].isalnum()]
+    forms = ([f"{w[:j]}[{w[j:]}](/fəˈnɛt/)" for j in cuts]
+             + [f"[{w[:j]}](/fəˈnɛt/){w[j:]}" for j in cuts])
+    if w[:1] in "-." and w[1:2].isdigit():
+        forms.append(f"{w[0]}[{w[1:]}](/fəˈnɛt/)")
+    return forms
+
+
 @settings(max_examples=300)
 @given(st.data(), paragraphs)
 def test_property_any_undeclared_word_change_fails(data, paras):
@@ -702,7 +876,8 @@ def test_property_any_undeclared_word_change_fails(data, paras):
     pi = data.draw(st.integers(0, len(mutated) - 1))
     p = mutated[pi]
     kind = data.draw(st.sampled_from(  # weighted: GLUED and DIFFERENT have many cases to cover
-        ["insert", "delete", "replace", "number", "override"] + ["symbol"] * 2 + ["spelling"] * 3))
+        ["insert", "delete", "replace", "number", "override", "spacing", "glued"]
+        + ["symbol"] * 2 + ["spelling"] * 3))
     k = data.draw(st.integers(0, len(p) - 1))
     if kind == "insert":
         p.insert(k, data.draw(st.sampled_from(VOCAB)))
@@ -720,6 +895,15 @@ def test_property_any_undeclared_word_change_fails(data, paras):
         wrap = data.draw(st.sampled_from(["{}", "({})", '"{}"', "('{}')"]))
         source[pi].insert(k, wrap.format(number))
         p.insert(k, wrap.format(data.draw(st.sampled_from(NUMBERS[number]))))
+    elif kind == "glued" and _glued_overrides(p[k]):
+        # the right word, but with an override glued into it ("Pengel[ley](/…/)",
+        # "[Mc](/…/)Donald", "-[5](/…/)"): misaki then drops the next word
+        p[k] = data.draw(st.sampled_from(_glued_overrides(p[k])))
+    elif kind == "spacing":
+        # the article says "$5"; the prepared text says "$ 5"
+        original = data.draw(st.sampled_from(sorted(SPACED)))
+        source[pi].insert(k, original)
+        p.insert(k, data.draw(st.sampled_from(SPACED[original])))
     elif kind == "spelling":
         # the article says "No. 5"; the prepared text says "No 5", "No.5", ...
         original = data.draw(st.sampled_from(sorted(DIFFERENT)))

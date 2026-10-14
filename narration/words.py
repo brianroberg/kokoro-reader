@@ -1,7 +1,9 @@
 """Word-preservation check (spec: "Quality gate", step 2).
 
 The prepared text must say exactly what the article says. Formatting,
-paragraph breaks, pauses and [BREAK] markers are invisible here.
+paragraph breaks, pauses and [BREAK] markers are invisible here. The server's
+gate additionally compares the engine's own phoneme output (Task 5); this
+module is the fast, explainable pre-check.
 
 Both texts are read as the engine receives them: text_to_speech.clean_markdown_text
 (the cleaning the CLI and KokoroEngine apply) and then prepare_for_tts (which
@@ -14,38 +16,60 @@ as misaki does.
 Each run of non-whitespace characters is split into tokens, following what
 misaki (the engine's grapheme-to-phoneme step) was checked to voice:
 - numbers. A "-", "." or "-." right before the digits is part of the number at
-  the start of the run, right after a symbol ("$-5" is "minus five"), or when
-  only silent characters come before it in the run and the one right before it
-  is not another "-" or ".": "-5", "(-5", ".5" and "-.5" are not "5", but
-  "..5", ".-5" and "-(5" read "five", and the hyphen in "5-6" is a range. An
-  apostrophe next to a digit is dropped, as misaki drops it: "5'6" is "56"
-  ("fifty-six") and "1990's" is "1990s";
+  the start of the run, or after any character that is neither part of a word
+  (a letter, a digit, or an apostrophe right after one) nor another "-" or
+  ".": "-5", "(-5", "fell(-5", "5;-6", "'-5", "$-5", ".5" and "-.5" are not "5",
+  but "..5", ".-5", "x-5" and "x'-5" read "five", and the hyphen in "5-6" is a
+  range. An apostrophe next to a digit is dropped, as misaki drops it: "5'6"
+  is "56" ("fifty-six") and "1990's" is "1990s";
 - dotted words with no space ("example.com", "U.S.", "e.g."), one token each;
-- the dotted abbreviations of misaki's lexicon, which keep their dot
-  (DOTTED_ABBREVIATIONS: "No. 5" is "number five", "No 5" is "no five");
+- the dotted abbreviations of misaki's lexicon, matched case-sensitively, which
+  keep their dot (DOTTED_ABBREVIATIONS: "No. 5" is "number five", "No 5" is "no
+  five"; a lowercase "no." is plain "no");
 - words, and every other character on its own.
-All of those must match, in order, on both sides, except the silent punctuation
-the engine doesn't voice and the skill may edit for pacing (SILENT).
+A run with a symbol in it (a character that is none of those and not silent:
+"$", "%", "/", "≤") is one token, its silent marks gone: "$(-5)" is "$-5" and
+"(5%)," is "5%". So any change of spacing around a symbol is a change ("≤-5"
+is "less five", "≤ -5" "less or equal to minus five"), even where misaki reads
+the two alike ("$.5" and "$ .5"). All tokens must match, in order, on both
+sides; only the silent punctuation the engine doesn't voice (SILENT) is free.
 
-Known differences from the engine, left as they are: misaki sometimes drops a
-"-5" entirely (after a quote, a colon or an em dash, say), which the check
-can't predict; a range such as "10,000-20,000" comes out garbled, and so does
-"-$3.50"; case is folded, though a case change can change the speech ("us" and
-"US"), because the skill uses capitals to steer pronunciation. misaki drops a
-minus glued after some marks ("<-5", "+-5" and "×-5" say "five", "plus five",
-"times five"), where the check keeps it: "5" to "<-5" is refused though it
-sounds the same, while "-5" to "<-5" and "×-5" to "× -5" pass though misaki
-says "minus" in only one of each. misaki reads "." then an apostrophe before digits
-(".'5") as "point five", which the check reads as "5". A silent mark glued to
-a year can switch misaki from "twenty twenty-three" to "two thousand
-twenty-three". And the check refuses some edits the engine reads the same way
-(a sentence-final "no." turned into "no,", "Dr." into "Dr", "1,000" into
-"1000"), since a refusal only costs a retry.
+The check takes time linear in its input. A prepared text far longer than the
+article, or with more words than the substitutions could add, is refused
+before any alignment, and a word of a substitution's spoken side or of an
+override is at most 64 characters.
+
+Accepted residuals, where misaki and the check still differ:
+- misaki drops a minus glued after "+ × % @ § © ∞ ~ = < ^ ‰" (and after a comma
+  glued to a word, "rose,-5"), where the check keeps it: "5" to "<-5" is refused
+  though it sounds the same, while "-5" to "<-5", "×-5" to "× -5" and "rose, -5"
+  to "rose,-5" pass though misaki says "minus" in only one of each;
+- misaki sometimes drops a "-5" entirely (after a quote, a colon or an em dash);
+- zero-width characters: misaki reads some as spaces ("five\u200bdollars" is
+  "five dollars"); here they are symbols, so edits around them are refused;
+- "No." before a newline reads "no" (misaki reads each line on its own), and a
+  lowercase "no." before a number reads "number" ("no. 3"); both are taken here
+  as their spelling says;
+- URLs: paths, ports and "@" ("example.com/news" has no "dot") are not modelled;
+- "'05" ("zero five") and "’05" ("five") are the same token here;
+- case is folded, though a case change can change the speech ("us" and "US",
+  "NO. 3"), because the skill uses capitals to steer pronunciation;
+- ".'5" reads "point five" in misaki, "5" here;
+- a silent mark glued to a year can switch misaki from "twenty twenty-three" to
+  "two thousand twenty-three";
+- misaki garbles "-$3.50" and ranges such as "10,000-20,000";
+- an override next to a currency sign ("$[5](/fˈIv/)") loses the currency word;
+- override phonemes are not checked to say their word until Task 4's
+  provenance rule.
+And the check refuses some edits the engine reads the same way (a sentence-final
+"No." turned into "No,", "Dr." into "Dr", "1,000" into "1000", spacing around a
+symbol), since a refusal only costs a retry.
 
 A phonetic override is validated for shape (one displayed word, a pronunciation
-with a letter, no whitespace, limited length) but its phonemes are not checked
-to say that word: an override can pronounce any single word. The server
-validates override provenance separately (Task 4).
+with a letter, no whitespace, limited length) and must stand apart from the
+words around it, but its phonemes are not checked to say that word: an override
+can pronounce any single word. The server validates override provenance
+separately (Task 4).
 
 Every change to the words themselves must be declared as a Substitution, and
 declared substitutions are bounded so they can't carry new content: each one is
@@ -80,6 +104,7 @@ MIN_RESPELLING_LETTERS = 6   # if both have at least this many letters
 MAX_RESPELLINGS = 50         # across the text: applications of respellings,
 RESPELLINGS_FRACTION = 0.05  # or this share of the article's words, whichever is larger
 _MAX_STATES_FACTOR = 50
+_MAX_TOKEN = 64              # characters in one word of a substitution's spoken side or an override
 _RESYNC_WINDOW = 12          # words per side searched for where the texts agree again
 
 # Single characters that read as nothing, which the skill may add or drop for pacing.
@@ -88,14 +113,17 @@ _RESYNC_WINDOW = 12          # words per side searched for where the texts agree
 # here. Next to a digit "-", ".", "," and "'" can be spoken; the number rules cover that.
 SILENT = frozenset(".,;:!?\"'‘’“”()[]{}-–—…^<>‰_`")
 
-# Abbreviations misaki reads differently with their dot ("No." is "number"), so the dot
-# stays in the token: the keys with a dot in misaki 0.9.4's us_gold.json (Dr. Esq. Etc.
-# Mr. Mrs. Ms. No. etc.; us_silver.json has none), and "vs.", which
-# Lexicon.get_special_case reads as "versus". Case-folded, like every token.
-DOTTED_ABBREVIATIONS = frozenset({"dr.", "esq.", "etc.", "mr.", "mrs.", "ms.", "no.", "vs."})
+# Abbreviations misaki reads differently with their dot ("No. 5" is "number five"), so
+# the dot stays in the token: exactly the keys with a dot in misaki 0.9.4's
+# us_gold.json (us_silver.json has none), case and all, and "vs.", which
+# Lexicon.get_special_case reads as "versus". Matched case-sensitively, then
+# case-folded like every token: "No." is the token "no.", "no." is "no".
+DOTTED_ABBREVIATIONS = frozenset(
+    {"Dr.", "Esq.", "Etc.", "Mr.", "Mrs.", "Ms.", "No.", "etc.", "vs."})
 
-# ASCII only, as the engine's own link syntax is: [word](/phonemes/).
-_PHONETIC = re.compile(r"\[([^\]]+)\]\(/([^)]*)/\)")
+# ASCII only, as the engine's own link syntax is: [word](/phonemes/). Neither part
+# may hold a "[", which keeps the search linear on long runs of brackets.
+_PHONETIC = re.compile(r"\[([^\[\]]+)\]\(/([^)\[]*)/\)")
 _WORD = r"[^\W_]+(?:'[^\W_]+)*"
 # Digits, joined by number punctuation or an apostrophe, with any letters glued on
 # ("3.5", "5'6", "1990's", "3rd"): one token.
@@ -104,7 +132,7 @@ _ABBREVIATION = "|".join(re.escape(a[:-1])
                          for a in sorted(DOTTED_ABBREVIATIONS, key=len, reverse=True))
 # A number, a dotted word ("example.com"), a dotted abbreviation, a word, or any
 # other single character.
-_TOKEN = re.compile(rf"{_NUMBER.pattern}|{_WORD}(?:\.{_WORD})+|(?i:{_ABBREVIATION})\.(?![^\W_])"
+_TOKEN = re.compile(rf"{_NUMBER.pattern}|{_WORD}(?:\.{_WORD})+|(?:{_ABBREVIATION})\.(?![^\W_])"
                     rf"|{_WORD}|\S")
 _SIGNS = ("-.", "-", ".")  # what may stand right before a number's digits, longest first
 _WORD_CHAR = re.compile(r"[^\W_]")
@@ -128,18 +156,25 @@ def _spoken_text(text: str) -> str:
     return text.replace("’", "'").replace("‘", "'").replace("[BREAK]", " ")
 
 
+def _is_word_char(text: str, k: int) -> bool:
+    """A letter or digit, or an apostrophe right after one (part of a word, as in
+    "rock'"; a quote mark at the start of a run is not)."""
+    if _WORD_CHAR.match(text[k]):
+        return True
+    return text[k] == "'" and k > 0 and bool(_WORD_CHAR.match(text[k - 1]))
+
+
+def _is_symbol(ch: str) -> bool:
+    """A character that is a token of its own: not whitespace, silent or part of a word."""
+    return not (ch.isspace() or ch in SILENT or _WORD_CHAR.match(ch))
+
+
 def _sign_belongs(run: str, start: int) -> bool:
     """Whether a "-", "." or "-." at run[start], right before a number's digits, is
-    part of the number: at the start of the run; right after a symbol, a character
-    that is a token of its own ("$-5" is "minus five"); or after silent characters
-    only, the last of them not another "-" or "." (misaki reads "(-5" and "…-5" as
-    "minus five", but "..5", ".-5" and "-(5" as "five")."""
-    if start == 0:
-        return True
-    before = run[start - 1]
-    if before not in SILENT and not _WORD_CHAR.match(before):
-        return True
-    return before not in "-." and all(ch in SILENT for ch in run[:start])
+    part of the number: at the start of the run, or after any character that is
+    neither part of a word nor another "-" or ".". misaki reads "(-5", "fell(-5",
+    "5;-6", "'-5" and "$-5" with "minus", but "..5", ".-5", "x-5" and "x'-5" without."""
+    return start == 0 or (run[start - 1] not in "-." and not _is_word_char(run, start - 1))
 
 
 def _run_tokens(run: str) -> list[str]:
@@ -161,9 +196,36 @@ def _run_tokens(run: str) -> list[str]:
 
 def _tokens(text: str) -> list[str]:
     """Case-folded tokens of already-cleaned text, silent punctuation dropped. An
-    apostrophe next to a digit goes, as misaki drops it ("5'6" says "fifty-six")."""
-    return [_DIGIT_APOSTROPHE.sub("", tok).casefold()
-            for run in text.split() for tok in _run_tokens(run) if tok not in SILENT]
+    apostrophe next to a digit goes, as misaki drops it ("5'6" says "fifty-six").
+    A run with a symbol in it is one token (_merge)."""
+    out = []
+    for run in text.split():
+        tokens = [_DIGIT_APOSTROPHE.sub("", tok).casefold()
+                  for tok in _run_tokens(run) if tok not in SILENT]
+        if any(_is_symbol(ch) for ch in run):
+            out.append(_merge(tokens))
+        else:
+            out.extend(tokens)
+    return out
+
+
+def _merge(tokens: list[str]) -> str:
+    """A run with a symbol in it, as one token: its tokens run together, silent
+    punctuation gone ("$(-5)" and "$-5" are "$-5", "(5%)," is "5%"), so any change
+    of spacing around a symbol is a change ("$5" and "$ 5", "≤-5" and "≤ -5"). Where
+    two words or numbers would run into each other a space stays: "3-4%" ("three
+    four percent") is "3 4%", not "34%" ("thirty-four percent")."""
+    merged = ""
+    for tok in tokens:
+        if merged and merged[-1].isalnum() and tok[0].isalnum():
+            merged += " "
+        merged += tok
+    return merged
+
+
+def _words_of(spoken: str) -> list[str]:
+    """words() of text already through _spoken_text."""
+    return _tokens(_PHONETIC.sub(r"\1", spoken))
 
 
 def words(text: str) -> list[str]:
@@ -175,16 +237,24 @@ def words(text: str) -> list[str]:
     can change what misaki reads ("--5" says "five", "No -- 5" says "number
     five"). A phonetic override reduces to its displayed word.
     """
-    return _tokens(_PHONETIC.sub(r"\1", _spoken_text(text)))
+    return _words_of(_spoken_text(text))
 
 
 def check(source: str, prepared: str, substitutions: list[Substitution]) -> list[str]:
     """Problems with `prepared` as a faithful reading of `source`; [] means it passes."""
-    src, prep = words(source), words(prepared)
+    if len(prepared) > 2 * len(source) + 10_000:
+        return [f"the prepared text is far longer than the article: {len(prepared)} "
+                f"characters against {len(source)}"]
+    spoken = _spoken_text(prepared)
+    src, prep = words(source), _words_of(spoken)
+    limit = added_words_limit(len(src))
+    if len(prep) > len(src) + limit:
+        return [f"the prepared text has {len(prep)} words against the article's {len(src)}; "
+                f"substitutions may add at most {limit}"]
     problems = _check_substitutions(src, substitutions)
     if problems:
         return problems
-    problems = _check_overrides(prepared)
+    problems = _check_overrides(spoken)
     pairs = [(tuple(words(s.original)), tuple(words(s.spoken))) for s in substitutions]
     aligned = _align(src, prep, pairs)
     if aligned is None:
@@ -195,14 +265,26 @@ def check(source: str, prepared: str, substitutions: list[Substitution]) -> list
     return problems + _check_budgets(src, substitutions, pairs, aligned)
 
 
-def _check_overrides(prepared: str) -> list[str]:
-    """Each phonetic override is one displayed word with one bounded pronunciation."""
+def _check_overrides(spoken: str) -> list[str]:
+    """Each phonetic override is one displayed word with one bounded pronunciation,
+    standing apart from the words around it: misaki's tokenizer misplaces an override
+    glued to a word ("Pengel[ley](/lˈA/) family" loses "family", "[Mc](/mək/)Donald"
+    loses "Donald") or to a sign before a number ("-[5](/fˈIv/) now" loses "now")."""
     problems = []
-    for m in _PHONETIC.finditer(_spoken_text(prepared)):
+    for m in _PHONETIC.finditer(spoken):
         shown, phonemes = m.group(1).strip(), m.group(2).strip("/")  # as the engine reads it
         why = []
-        if len(_tokens(shown)) != 1:
+        if m.start() and _is_word_char(spoken, m.start() - 1):
+            why.append("it is glued to the word before it")
+        if m.end() < len(spoken) and _is_word_char(spoken, m.end()):
+            why.append("it is glued to the word after it")
+        if m.start() and spoken[m.start() - 1] in "-." and shown[:1].isdigit():
+            why.append(f"a {spoken[m.start() - 1]!r} is glued before the number it shows")
+        shown_words = _tokens(shown)
+        if len(shown_words) != 1:
             why.append("the displayed text must be exactly one word")
+        elif len(shown_words[0]) > _MAX_TOKEN:
+            why.append(f"the displayed word is longer than {_MAX_TOKEN} characters")
         if not phonemes:
             why.append("the phonemes are empty")
         else:
@@ -234,6 +316,8 @@ def _check_substitutions(src: list[str], subs: list[Substitution]) -> list[str]:
             continue
         if len(o) > MAX_SPOKEN_WORDS:
             problems.append(f"{label}: the original is too long: at most {MAX_SPOKEN_WORDS} words")
+        if any(len(word) > _MAX_TOKEN for word in sp):
+            problems.append(f"{label}: a spoken word is longer than {_MAX_TOKEN} characters")
         if len(sp) > MAX_SPOKEN_WORDS or len(sp) > len(o) + MAX_EXTRA_WORDS:
             problems.append(f"{label} is too long: at most {MAX_SPOKEN_WORDS} spoken words, "
                             f"and at most {MAX_EXTRA_WORDS} more than the original")
@@ -255,11 +339,13 @@ def _squash(tokens: tuple) -> str:
     and "$5", "3rd" and "3 rd" all sound different."""
     chars = []  # (character, spoken although it is in SILENT)
     for i, tok in enumerate(tokens):
-        unsigned = tok.lstrip("-.")
-        sign = len(tok) - len(unsigned) if unsigned[:1].isdigit() else 0
         if i:
             chars.append((" ", False))
-        chars += [(ch, k < sign) for k, ch in enumerate(tok)]
+        # A "-" left in a token is always a sign; a "." is one before a digit when no
+        # letter or digit comes right before it ("$.5", "-.5"; not "3.5" or "u.s").
+        chars += [(ch, ch == "-" or (ch == "." and tok[k + 1:k + 2].isdigit()
+                                      and not (k and tok[k - 1].isalnum())))
+                  for k, ch in enumerate(tok)]
     squashed, gap = "", ""
     for ch, spoken in chars:
         if not spoken and (ch.isspace() or ch in SILENT):
@@ -289,6 +375,7 @@ def _is_respelling(original: tuple, spoken: tuple) -> bool:
         return False
     a, b = original[0], spoken[0]
     return (a.isalpha() and b.isalpha() and min(len(a), len(b)) >= MIN_RESPELLING_LETTERS
+            and max(len(a), len(b)) <= _MAX_TOKEN
             and a[0] == b[0] and a not in b and b not in a
             and difflib.SequenceMatcher(None, a, b, autojunk=False).ratio() >= RESPELLING_RATIO)
 
@@ -366,6 +453,16 @@ def _align(src, prep, pairs):
     n, m = len(src), len(prep)
     limit = _MAX_STATES_FACTOR * (n + m) + 1000
     extra = [max(0, len(sp) - len(o)) for o, sp in pairs]
+    # Where each pair's original starts in src, and where its spoken form starts in
+    # prep, found once rather than at every state.
+    starts_here = [[] for _ in range(n + 1)]
+    for k, (o, _) in enumerate(pairs):
+        for i in _occurrences(src, o):
+            starts_here[i].append(k)
+    spoken_at = [bytearray(m + 1) for _ in pairs]
+    for k, (_, sp) in enumerate(pairs):
+        for j in _occurrences(prep, sp):
+            spoken_at[k][j] = 1
     best = {(0, 0): (0, None, None)}  # state -> (words added so far, previous state, pair index)
     heap, done = [(0, 0)], set()
     furthest = (0, 0)
@@ -388,8 +485,9 @@ def _align(src, prep, pairs):
         steps = []
         if i < n and j < m and src[i] == prep[j]:
             steps.append((i + 1, j + 1, 0, None))
-        for k, (o, sp) in enumerate(pairs):
-            if tuple(src[i:i + len(o)]) == o and tuple(prep[j:j + len(sp)]) == sp:
+        for k in starts_here[i]:
+            if spoken_at[k][j]:
+                o, sp = pairs[k]
                 steps.append((i + len(o), j + len(sp), extra[k], k))
         for ni, nj, c, k in steps:
             if (ni, nj) not in best or cost + c < best[(ni, nj)][0]:
@@ -399,6 +497,13 @@ def _align(src, prep, pairs):
     while state != (0, 0) and best[state][2] is None:
         plain, state = plain + 1, best[state][1]
     return _Stuck(*furthest, plain)
+
+
+def _occurrences(seq: list[str], sub: tuple) -> list[int]:
+    """Where `sub` starts in `seq`."""
+    n, first = len(sub), sub[0]
+    return [i for i in range(len(seq) - n + 1)
+            if seq[i] == first and tuple(seq[i:i + n]) == sub]
 
 
 def _substitution_at(src, prep, pairs, i, j) -> bool:
