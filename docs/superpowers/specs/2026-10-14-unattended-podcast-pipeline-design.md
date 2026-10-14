@@ -91,16 +91,16 @@ The narration server runs on the Mac, because MLX needs Apple Silicon. The runne
 
 - **The Mac runs only the narration server.** It runs as Brian's own user, as a launchd LaunchAgent (`net.robergb.narration`). It's bound to the Mac's tailnet address, with the two tokens. Brian's voicemode server already works this way.
 - **No second Mac user is needed.** The account existed only because an LLM would be reading untrusted text on the Mac. Here the Mac runs deterministic code that takes typed arguments and never reads instructions.
-- **The runner and the agent share one container on the home server** (working name `narration-agent`):
-  - **It starts from agentbox's image and its `restricted` egress profile.** Allowed: `api.anthropic.com`, the Mac's narration endpoint, the source sites (for fetching), Audiobookshelf and the push server.
-  - **Inside the container, the runner and the agent are different Linux users.** The runner's secrets (the Audiobookshelf key, the push token, the runner token) are files the agent user can't read.
-  - **The agent user holds only** its Claude login and the agent token.
+- **The runner and the agent run in two containers on the home server,** joined by a private internal network. Both are built on agentbox's image and egress firewall.
+  - **`narration-runner`** holds the Audiobookshelf key, the push token and the runner token. It may reach the source sites (for fetching), Audiobookshelf, the push server and the Mac's narration endpoint.
+  - **`narration-agent`** holds only the Claude login (a `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`, as agentbox already uses) and the agent token. It may reach only `api.anthropic.com` and the Mac's narration endpoint. A small session service in it accepts one call from the runner, "run the session for work item N." It validates the id, runs `claude -p`, and returns the outcome and cost. Nothing else reaches it.
+  - **Why two containers, not one with two Linux users.** In one container, the runner would have to run as root to start sessions as another user. The two containers' network permissions would also merge. Split, a hijacked agent sits in a container with no secrets beyond its own Claude login, and two places it can reach.
 - **The home server is always on.** Discovery and the record can run any time; only recording needs the Mac to be awake.
 - **This container is not the existing assistant's.** Revision 1 set aside "an agent on the home server" because that assistant holds unrelated credentials. That reason applies to running inside the assistant, not to the host.
 
 **What this costs:**
 - **Two machines and a tailnet link.** If the Mac isn't reachable, recording waits until the next night.
-- **Brian deploys** a compose service on the home server, plus the launchd job on the Mac.
+- **Brian deploys** two compose services on the home server, plus the launchd job on the Mac.
 
 **Considered and set aside:**
 - **L: the runner and the agent on the Mac,** under a separate macOS user. It's simpler, with one machine, but it needs a second Mac account and leaves roadmap item 4 for later.
@@ -221,7 +221,7 @@ These folders later become the test set for comparing TTS models.
 - **Containment tests:**
   - A real headless session is asked to run a shell command, read a file and fetch a URL. All three must be refused.
   - A planted test article carries hidden instructions. Any text it gets inserted must fail the word check.
-  - From inside the agent user, the runner's secret files can't be read, and a host off the allow-list can't be reached.
+  - From inside `narration-agent`, any host other than its two allowed destinations can't be reached. Its session service refuses anything but a valid work id.
   - The narration server refuses a call without a token, and refuses a runner tool called with the agent token.
 - **Acceptance:** one real article end to end in dry run, then published. Brian listens to it before the schedule is turned on.
 
@@ -229,7 +229,12 @@ These folders later become the test set for comparing TTS models.
 
 0. **Prerequisites:**
    - this repo's #6 (rename the skill to `recording-article-audio`);
-   - article-assistant #3 (the New Atlantis description and publication date).
+   - article-assistant #3 (the New Atlantis description and publication date);
+   - **agentbox, three small changes:**
+     - let the entrypoint run a given command, not only its tmux start script;
+     - a switch to leave GitHub out of the `restricted` profile;
+     - uv in the image (agentbox #6).
+   - For an unattended service, also pin the Claude Code version and turn off auto-update. agentbox #10 documents why auto-update fails in that image anyway.
 1. **v1, as above,** with the agent in the container on the home server.
 2. **Cost review** after a couple of weeks, to set the cap from the recorded numbers.
 3. **A model-testing harness** that replays saved work folders through a candidate TTS or checking model, behind the same `record` and `check` tools. This also covers this repo's #3 (local models for the check).
@@ -243,8 +248,9 @@ Future work Brian named: remove the Gemini dependency, and use newer TTS models 
 | Decision | Why | If it's wrong |
 |---|---|---|
 | The runner fetches and publishes; the agent doesn't | Keeps the Audiobookshelf key, the push token and open web access out of the agent's reach | Little lost; those steps simply sit in code |
+| Two containers (runner and agent), not one with two users | The agent's container has no other secrets and two egress destinations; the runner never needs root | One more small service, the agent's session endpoint |
 | One MCP server, with separate agent and runner tool sets and tokens | The agent can't open work items or download files; one process to run | Splitting it into two servers later is mechanical |
-| The server name is `narration`, the container is `narration-agent`, and the launchd label is `net.robergb.narration` | Brian's rule: no model name | A rename |
+| The server name is `narration`, the containers are `narration-runner` and `narration-agent`, and the launchd label is `net.robergb.narration` | Brian's rule: no model name | A rename |
 | SQLite for the record | One file; safe updates mid-run | A JSON file would also work; it's a small swap |
 | Code lives in this repo, in a `pipeline/` folder | Uses the toolkit directly, and keeps article-assistant light (ADR-001) | Moving it to its own repo later is mechanical |
 | Web-only pieces count from the start date | Brian asked for every article; the edition rule can't cover pieces without an edition | A web-only piece could be recorded that he'd have skipped. He'd see it in the feed and the summary |
@@ -255,6 +261,6 @@ Future work Brian named: remove the Gemini dependency, and use newer TTS models 
 
 - **What are the exact `claude -p` flags** that give a session only the narration server's tools, with every built-in tool off? Verify before building on it.
 - **Does a scheduled wake work on this MacBook when it's closed and on power?** If not, it has to be left open and awake overnight (for example with `caffeinate`).
-- **How does headless Claude Code log in on Brian's subscription inside the container?** This covers how the login is kept and renewed.
+- **Headless Claude login inside the container.** agentbox already uses `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`. Its notes say this works with a Max subscription and lasts about a year. Confirm it here, and add a reminder before it expires.
 - **Does MLX get the GPU when the narration server runs as a LaunchAgent** rather than from a terminal?
 - **How does The New Atlantis's `/issues` page mark which articles belong to an edition?** This decides how the listing is read.
