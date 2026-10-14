@@ -76,12 +76,12 @@ def test_docs_name_the_skill_by_its_new_name():
 ```bash
 mkdir -p .claude/skills/recording-article-audio
 git mv .claude/skills/article-tts-recording.md .claude/skills/recording-article-audio/SKILL.md
-sed -i 's/^name: article-tts-recording$/name: recording-article-audio/' .claude/skills/recording-article-audio/SKILL.md
-sed -i 's#\.claude/skills/article-tts-recording\.md#.claude/skills/recording-article-audio/SKILL.md#g; s#/article-tts-recording#/recording-article-audio#g' README.md docs/adr-001-no-orchestration-script.md
-grep -rn "article-tts-recording" . --include=*.md --include=*.py | grep -v -e docs/superpowers -e tests/test_readme_docs.py
+perl -pi -e 's/^name: article-tts-recording$/name: recording-article-audio/' .claude/skills/recording-article-audio/SKILL.md
+perl -pi -e 's#\.claude/skills/article-tts-recording\.md#.claude/skills/recording-article-audio/SKILL.md#g; s#/article-tts-recording#/recording-article-audio#g' README.md docs/adr-001-no-orchestration-script.md
+grep -rn "article-tts-recording" . --include='*.md' --include='*.py' | grep -v -e docs/superpowers -e tests/test_readme_docs.py
 ```
 
-  Expected: the final `grep` prints nothing. The plan and spec documents keep the old name on purpose, because they describe the rename, and `tests/test_readme_docs.py` names it (twice) to assert it's gone; both are excluded.
+  Expected: the final `grep` prints nothing (and exits 1, as `grep` does when it selects no lines). `perl -pi -e` is used instead of `sed -i` because GNU and BSD `sed` disagree on `-i`'s syntax and the step must work on both macOS and Linux. The plan and spec documents keep the old name on purpose, because they describe the rename, and `tests/test_readme_docs.py` names it (twice) to assert it's gone; both are excluded.
 - [ ] **Step 4: Run the whole suite and see it pass.** Run `uv run python -m pytest -q`. On Linux, tests that need MLX skip or are mocked as they are today. Expected: everything that passed before still passes, plus the two new tests.
 - [ ] **Step 5: Commit.**
 
