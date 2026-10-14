@@ -14,6 +14,7 @@ from verify_audio import (
     verify_audio,
     main,
     precheck_report,
+    precheck_warnings,
     format_timestamp,
     find_section_gaps,
     split_audio_at_gaps,
@@ -557,3 +558,17 @@ class TestCLI:
 
         with pytest.raises(SystemExit):
             main([audio_path, "/nonexistent/text.txt"])
+
+
+def test_precheck_warnings_lists_pace_and_long_silence():
+    audio = make_segment([("tone", 1000), ("silence", 6000), ("tone", 1000)])
+    text = " ".join(["word"] * 400)  # far too many words for 8 s of audio
+    warnings = precheck_warnings(audio, text)
+    assert any("WPM" in w for w in warnings)
+    assert any("of silence at" in w for w in warnings)
+
+
+def test_precheck_warnings_empty_for_normal_audio():
+    audio = make_segment([("tone", 60000)])
+    text = " ".join(["word"] * 160)  # 160 WPM
+    assert precheck_warnings(audio, text) == []

@@ -54,33 +54,43 @@ def format_timestamp(ms: int) -> str:
     return f"{total_seconds // 60}:{total_seconds % 60:02d}"
 
 
-def precheck_report(audio: AudioSegment, source_text: str) -> str:
-    """Deterministic sanity checks that run before any model call.
-
-    Reports audio duration, source word count, and effective words per
-    minute. Costs nothing — no API call involved.
-    """
+def precheck_warnings(audio: AudioSegment, source_text: str) -> list:
+    """Deterministic warnings: pace outside 100-250 WPM, or silences over 5 s."""
     duration_ms = len(audio)
     word_count = len(re.sub(r"\[BREAK\]", " ", source_text).split())
     wpm = word_count / (duration_ms / 60000) if duration_ms else 0
-
-    lines = [
-        "## Pre-check (deterministic)",
-        f"Duration: {format_timestamp(duration_ms)} | "
-        f"{word_count} words | {wpm:.0f} WPM",
-    ]
+    warnings = []
     if not 100 <= wpm <= 250:
-        lines.append(
-            f"WARNING: pace of {wpm:.0f} WPM is outside the normal speech "
+        warnings.append(
+            f"pace of {wpm:.0f} WPM is outside the normal speech "
             "range (100-250) — audio may be truncated or have extra content."
         )
     for start_ms, end_ms in detect_silence(
         audio, min_silence_len=5000, silence_thresh=-40, seek_step=100
     ):
-        lines.append(
-            f"WARNING: {format_timestamp(end_ms - start_ms)} of silence at "
+        warnings.append(
+            f"{format_timestamp(end_ms - start_ms)} of silence at "
             f"{format_timestamp(start_ms)} — far longer than a [BREAK] pause."
         )
+    return warnings
+
+
+def precheck_report(audio: AudioSegment, source_text: str) -> str:
+    """Deterministic sanity checks that run before any model call.
+
+    Reports audio duration, source word count, and effective words per
+    minute, followed by any precheck_warnings. Costs nothing — no API
+    call involved.
+    """
+    duration_ms = len(audio)
+    word_count = len(re.sub(r"\[BREAK\]", " ", source_text).split())
+    wpm = word_count / (duration_ms / 60000) if duration_ms else 0
+    lines = [
+        "## Pre-check (deterministic)",
+        f"Duration: {format_timestamp(duration_ms)} | "
+        f"{word_count} words | {wpm:.0f} WPM",
+    ]
+    lines += [f"WARNING: {w}" for w in precheck_warnings(audio, source_text)]
     return "\n".join(lines)
 
 
