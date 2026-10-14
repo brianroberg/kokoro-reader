@@ -187,7 +187,12 @@ SPOKEN_SYMBOLS = "#*=/°×±¥¢©§√∞"
 
 def test_signs_and_leading_points_belong_to_the_number():
     assert words("-5 .5 3.5 (-5) well-known 5-10") == [
-        "-5", ".5", "3.5", "5", "well", "known", "5", "10"]
+        "-5", ".5", "3.5", "-5", "well", "known", "5", "10"]
+
+
+def test_a_hyphen_between_digits_is_a_range_not_a_sign():
+    assert words("5-6") == ["5", "6"]
+    assert check("They sold 5-6 items.", "They sold 5 6 items.", []) == []
 
 
 def test_any_other_symbol_is_a_token_of_its_own():
@@ -201,6 +206,17 @@ def test_any_other_symbol_is_a_token_of_its_own():
     ("It is -5 degrees.", "It is 5 degrees."),
 ])
 def test_signs_and_decimal_points_are_not_free(article, prepared):
+    assert check(article, prepared, [])
+
+
+@pytest.mark.parametrize("article, prepared", [
+    ("It is (5 degrees).", "It is (-5 degrees)."),
+    ('He said "5" degrees.', 'He said "-5" degrees.'),
+    ('He said "5" degrees.', 'He said ".5" degrees.'),
+    ("It is (.5 degrees).", "It is (5 degrees)."),
+    ("It is ('5 degrees').", "It is ('-5 degrees')."),
+])
+def test_a_sign_after_punctuation_still_belongs_to_the_number(article, prepared):
     assert check(article, prepared, [])
 
 
@@ -270,6 +286,7 @@ def _repeat(sentence, times):
     ("never", "ever"), ("he", "she"), ("man", "woman"), ("possible", "impossible"),
     ("5", "55"), ("2019", "2091"), ("did not", "did"), ("not guilty", "guilty"),
     ("40%", "40"), ("$5", "5"), ("Smith & Jones", "Smith Jones"),
+    ("form", "from"), ("then", "than"), ("their", "there"),  # under six letters: always counted
 ])
 def test_a_substitution_that_changes_the_meaning_is_not_a_respelling(original, spoken):
     article = _repeat(f"Ok {original} fine.", 25)
@@ -279,9 +296,20 @@ def test_a_substitution_that_changes_the_meaning_is_not_a_respelling(original, s
     assert "applied 25 times" in problems[0] and "changes 25 words" in problems[0]
 
 
+@pytest.mark.parametrize("original, spoken", [
+    ("1000", "1 000"), ("55", "5 5"), ("3rd", "3 rd"),   # spoken differently
+])
+def test_splitting_digits_is_a_change_not_a_respelling(original, spoken):
+    article = _repeat(f"Ok {original} fine.", 11)
+    prepared = _repeat(f"Ok {spoken} fine.", 11)
+    problems = check(article, prepared, [Substitution(original, spoken)])
+    assert len(problems) == 1 and "changes 22 words" in problems[0]
+
+
 @pytest.mark.parametrize("original, spoken, times", [
     ("Pengelley", "Pengelly", 30),   # one token each, same letters apart from a slip
     ("DOJ", "D O J", 10),            # identical once spaced letters are squashed
+    ("Kevorkian", "Kevorkean", 25),  # six letters or more, very alike
     ("e-mail", "email", 25),         # a hyphen is silent
     ("U.S.", "US", 25),
 ])
@@ -425,8 +453,9 @@ def test_property_any_undeclared_word_change_fails(data, paras):
     elif kind == "number":
         # the article says "3.5"; the prepared text says "3 5", "35", ...
         number = data.draw(st.sampled_from(sorted(NUMBERS)))
-        source[pi].insert(k, number)
-        p.insert(k, data.draw(st.sampled_from(NUMBERS[number])))
+        wrap = data.draw(st.sampled_from(["{}", "({})", '"{}"', "('{}')"]))
+        source[pi].insert(k, wrap.format(number))
+        p.insert(k, wrap.format(data.draw(st.sampled_from(NUMBERS[number]))))
     else:
         # the right word, wrapped in an override that could say anything
         forms = [f"[{{}}](/{phonemes}/)" for phonemes in BAD_PHONEMES] + FULLWIDTH_OVERRIDES

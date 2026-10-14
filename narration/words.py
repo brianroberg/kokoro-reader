@@ -11,12 +11,13 @@ different token from "$". The only edits are to drop [BREAK] markers, read a
 phonetic override as its displayed word, and read a curly apostrophe as a
 straight one.
 
-Each run of non-whitespace characters is split into tokens: numbers (a leading
-"-" or "." at the start of the run is part of the number: "-5" and ".5" are not
-"5"), words, and every other character on its own. All of those must match,
-in order, on both sides, except the silent punctuation the engine doesn't
-voice and the skill may edit for pacing (SILENT: , . ; : ! ? quotes brackets
-dashes ellipses and a few marks that read as nothing).
+Each run of non-whitespace characters is split into tokens: numbers (a "-" or
+"." right before a number belongs to it when only silent punctuation comes
+before it in the run: "-5", "(-5)" and ".5" are not "5", but the hyphen in "5-6"
+is a range), words, and every other character on its own. All of those must
+match, in order, on both sides, except the silent punctuation the engine
+doesn't voice and the skill may edit for pacing (SILENT: , . ; : ! ? quotes
+brackets dashes ellipses and a few marks that read as nothing).
 
 A phonetic override is validated for shape (one displayed word, a pronunciation
 with a letter, no whitespace, limited length) but its phonemes are not checked
@@ -27,7 +28,10 @@ Every change to the words themselves must be declared as a Substitution, and
 declared substitutions are bounded so they can't carry new content: each one is
 short, and across the whole text all of them together may add only a few words
 and change only a few words, however many times each is applied. Only a
-respelling (the same sounds spelled differently) is free of the second budget.
+respelling is free of the second budget, and "respelling" is a syntactic
+notion here (same letters spaced differently, or two long, very alike words),
+not a judgment that the sounds are the same, so the published notes list every
+substitution and a reader can see what was changed.
 """
 from __future__ import annotations
 
@@ -47,7 +51,8 @@ MAX_ADDED_WORDS = 20         # across the text: words all the applied substituti
 ADDED_WORDS_FRACTION = 0.02  # or this share of the article's words, whichever is larger
 MIN_OVERRIDE_PHONEMES = 12   # a phonetic override's phonemes: at most this many characters,
 OVERRIDE_PHONEMES_PER_CHAR = 3  # or this many per displayed character, whichever is larger
-RESPELLING_RATIO = 0.75      # single words this similar (and no more related) are respellings
+RESPELLING_RATIO = 0.75      # single words this similar (and no more related) are respellings,
+MIN_RESPELLING_LETTERS = 6   # if both have at least this many letters
 _MAX_STATES_FACTOR = 50
 _RESYNC_WINDOW = 12          # words per side searched for where the texts agree again
 
@@ -56,12 +61,9 @@ SILENT = frozenset(".,;:!?\"'‘’“”()[]{}-–—…~^<>÷‰_`")
 
 # ASCII only, as the engine's own link syntax is: [word](/phonemes/).
 _PHONETIC = re.compile(r"\[([^\]]+)\]\(/([^)]*)/\)")
-# A number (a leading - or . counts only at the start of a run, and a number
-# glued to letters is a word), a word, or any other single character.
-_TOKEN = re.compile(r"\A[-.]?\d+(?:[.,/:]\d+)*(?![^\W_])"
-                    r"|\d+(?:[.,/:]\d+)*(?![^\W_])"
-                    r"|[^\W_]+(?:'[^\W_]+)*"
-                    r"|\S")
+# A number (one glued to letters is a word instead), a word, or any other single character.
+_NUMBER = re.compile(r"\d+(?:[.,/:]\d+)*(?![^\W_])")
+_TOKEN = re.compile(_NUMBER.pattern + r"|[^\W_]+(?:'[^\W_]+)*|\S")
 
 
 @dataclass(frozen=True)
@@ -80,9 +82,21 @@ def _spoken_text(text: str) -> str:
     return clean_markdown_text(text).replace("’", "'").replace("‘", "'").replace("[BREAK]", " ")
 
 
+def _run_tokens(run: str) -> list[str]:
+    """The tokens of one run of non-whitespace characters. A "-" or "." right
+    before a number is part of it when only silent characters precede it in the run."""
+    lead = 0
+    while lead < len(run) and run[lead] in SILENT:
+        lead += 1
+    number = _NUMBER.match(run, lead) if lead and run[lead - 1] in "-." else None
+    if number:
+        return [run[lead - 1] + number.group()] + _TOKEN.findall(run, number.end())
+    return _TOKEN.findall(run)
+
+
 def _tokens(text: str) -> list[str]:
     """Case-folded tokens of already-cleaned text, silent punctuation dropped."""
-    return [tok.casefold() for run in text.split() for tok in _TOKEN.findall(run)
+    return [tok.casefold() for run in text.split() for tok in _run_tokens(run)
             if tok not in SILENT]
 
 
@@ -167,20 +181,35 @@ def _contains(seq: list[str], sub: list[str]) -> bool:
     return any(seq[i:i + n] == sub for i in range(len(seq) - n + 1))
 
 
+def _squash(tokens: tuple) -> str:
+    """The tokens run together, but kept apart where a digit meets a digit or a
+    letter, since "55" and "5 5", "1000" and "1 000", "3rd" and "3 rd" sound different."""
+    squashed = ""
+    for tok in tokens:
+        if squashed and squashed[-1].isalnum() and tok[0].isalnum() and (
+                squashed[-1].isdigit() or tok[0].isdigit()):
+            squashed += " "
+        squashed += tok
+    return squashed
+
+
 def _is_respelling(original: tuple, spoken: tuple) -> bool:
-    """Whether `spoken` is the same sounds as `original`, spelled differently.
+    """Whether `spoken` is `original` spelled differently, not another word.
 
     Either the two are identical once whitespace and silent characters are gone
-    (letters, digits and symbols all kept: "DOJ" and "D O J"), or each is one
-    word, of letters only, that starts with the same letter, neither inside the
-    other ("not" and "now" differ in meaning, "the" and "they" or "legal" and
-    "illegal" are different words), and that are very alike."""
-    if "".join(original) == "".join(spoken):
+    (letters, digits and symbols all kept; "DOJ" and "D O J"), or each is one
+    word, of letters only, at least MIN_RESPELLING_LETTERS long, that starts with
+    the same letter, neither inside the other ("the" and "they", "legal" and
+    "illegal"), and that are very alike ("Pengelley" and "Pengelly"). Shorter
+    words that are alike ("form" and "from", "not" and "now") differ in meaning
+    too often to be exempt."""
+    if _squash(original) == _squash(spoken):
         return True
     if len(original) != 1 or len(spoken) != 1:
         return False
     a, b = original[0], spoken[0]
-    return (a.isalpha() and b.isalpha() and a[0] == b[0] and a not in b and b not in a
+    return (a.isalpha() and b.isalpha() and min(len(a), len(b)) >= MIN_RESPELLING_LETTERS
+            and a[0] == b[0] and a not in b and b not in a
             and difflib.SequenceMatcher(None, a, b, autojunk=False).ratio() >= RESPELLING_RATIO)
 
 
