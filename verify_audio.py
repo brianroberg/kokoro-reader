@@ -54,11 +54,17 @@ def format_timestamp(ms: int) -> str:
     return f"{total_seconds // 60}:{total_seconds % 60:02d}"
 
 
-def precheck_warnings(audio: AudioSegment, source_text: str) -> list:
-    """Deterministic warnings: pace outside 100-250 WPM, or silences over 5 s."""
+def _pace_stats(audio: AudioSegment, source_text: str) -> tuple[int, int, float]:
+    """Return (duration_ms, word_count, wpm); [BREAK] markers are not words."""
     duration_ms = len(audio)
     word_count = len(re.sub(r"\[BREAK\]", " ", source_text).split())
     wpm = word_count / (duration_ms / 60000) if duration_ms else 0
+    return duration_ms, word_count, wpm
+
+
+def precheck_warnings(audio: AudioSegment, source_text: str) -> list[str]:
+    """Deterministic warnings: pace outside 100-250 WPM, or silences over 5 s."""
+    _, _, wpm = _pace_stats(audio, source_text)
     warnings = []
     if not 100 <= wpm <= 250:
         warnings.append(
@@ -82,9 +88,7 @@ def precheck_report(audio: AudioSegment, source_text: str) -> str:
     minute, followed by any precheck_warnings. Costs nothing — no API
     call involved.
     """
-    duration_ms = len(audio)
-    word_count = len(re.sub(r"\[BREAK\]", " ", source_text).split())
-    wpm = word_count / (duration_ms / 60000) if duration_ms else 0
+    duration_ms, word_count, wpm = _pace_stats(audio, source_text)
     lines = [
         "## Pre-check (deterministic)",
         f"Duration: {format_timestamp(duration_ms)} | "
