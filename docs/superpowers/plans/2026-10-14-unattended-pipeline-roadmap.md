@@ -13,11 +13,15 @@
 | **2. Narration server** (`2026-10-14-plan-2-narration-server.md`) | The `narration` MCP server: work items, the six agent tools, runner tools, the quality gate, bearer-token auth | kokoro-reader | agents; Brian installs it on the Mac at the end | S1 |
 | **3. Runner, agent container, deploy** | Discovery and sources, the record (SQLite), the nightly flow, publishing and pushes, the `narration-agent` session service, both container images, compose and launchd | kokoro-reader (+ compose on the home server) | agents; Brian deploys | Plans 1 and 2, and S2–S4. **Written after the spikes report**, because their answers change its shape |
 
-**Changes the plans make to the spec:** one, recorded here for Brian's veto. The spec has `narration-agent` holding "the agent token", a single standing token. Plan 2 instead makes the token **per work item**:
-- the runner's `open` call mints it;
-- it stops working at `finish` or `finalize`.
+**Changes the plans make to the spec:** two, recorded here for Brian's veto.
 
-A hijacked agent session can then reach only its own article, and no agent token sits in the container between runs. *If that's wrong:* nothing user-visible changes. The cost is one value the runner passes to the session service with each work id.
+1. The spec has `narration-agent` holding "the agent token", a single standing token. Plan 2 instead makes the token **per work item**:
+   - the runner's `open` call mints it;
+   - it stops working at `finish` or `finalize`.
+
+   A hijacked agent session can then reach only its own article, and no agent token sits in the container between runs. *If that's wrong:* nothing user-visible changes. The cost is one value the runner passes to the session service with each work id.
+
+2. The spec's `finish` contract writes a substitution as `{"from": "XIV", "to": "the Fourteenth", "why": "roman numeral"}`. Plan 2's `finish` takes **`{"original": "XIV", "spoken": "the Fourteenth", "why": "roman numeral"}`**: `from` is a Python keyword, so it can't be a plain pydantic field or a tool argument, and the plan's names say which side is which. The same keys are in `result.json` and `state.json`. Plan 3 and the skill are written from the plan's keys, not the spec's. *If that's wrong:* nothing user-visible changes. The cost is an alias on one pydantic field (`from` can't be a Python name), and the rename wherever the keys are read.
 
 **Rough cost (an estimate, not measured):** Plans 1 and 2 are 14 tasks for agents. At the level of recent builds, that's roughly 2–4M tokens including per-task reviews. Plan 0 costs a few cents of Claude usage plus an evening of the Mac.
 

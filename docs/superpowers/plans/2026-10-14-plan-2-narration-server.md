@@ -18,7 +18,7 @@ Agent tokens are per work item: the runner's `open` call mints one, and `finish`
 - pydantic, for tool argument models;
 - pytest and Hypothesis.
 
-**Spec:** `docs/superpowers/specs/2026-10-14-unattended-podcast-pipeline-design.md`: "The narration server (MCP)", "The agent session's contract", "Quality gate". Also read `docs/superpowers/plans/2026-10-14-unattended-pipeline-roadmap.md`, both for the per-item token refinement and for spike S1's result.
+**Spec:** `docs/superpowers/specs/2026-10-14-unattended-podcast-pipeline-design.md`: "The narration server (MCP)", "The agent session's contract", "Quality gate". Also read `docs/superpowers/plans/2026-10-14-unattended-pipeline-roadmap.md`, for the two refinements to the spec (per-item tokens; `original`/`spoken` as the substitution keys) and for spike S1's result.
 
 ## Global Constraints
 
@@ -45,7 +45,7 @@ Agent tokens are per work item: the runner's `open` call mints one, and `finish`
 
 ## Review Focus
 
-1. **A declared substitution used to smuggle in words.** For example, `"the" → "buy crypto now at"`. The limits must refuse it: the spoken side is at most 6 words and at most 3 more than the original, and the original must appear in the article. Test in Task 2.
+1. **A declared substitution used to smuggle in words.** For example, `"the" → "buy crypto now at"`. The limits must refuse it: the spoken side is at most 6 words and at most 3 more than the original, and the original must appear in the article. One that fits those bounds but is applied at every `the` (`"the" → "buy crypto now the"`) must be refused too: all the substitutions together may add at most 20 words (2% of a long article) across the prepared text. Test in Task 2.
 2. **A substitution whose spoken form starts with the same words as the original.** `"Pope Leo XIV" → "Pope Leo the Fourteenth"` must still align; a greedy matcher would fail it. Test in Task 2.
 3. **`replace_text` whose `old` appears twice, or not at all.** It must refuse, change nothing, and say how many matches it found, like Claude Code's Edit tool. Test in Task 4.
 4. **A token reused after `finish`.** Every agent tool must refuse it, and the HTTP layer must return 401. Test in Tasks 4 and 7.
@@ -148,14 +148,15 @@ def precheck_report(audio: AudioSegment, source_text: str) -> str:
   - `Substitution(original: str, spoken: str)`, a frozen dataclass;
   - `words(text: str) -> list[str]`: the words the engine will speak, case-folded. It runs `text_to_speech.clean_markdown_text` first, the same cleaning the CLI and `KokoroEngine` (Task 4) apply before generating audio, then drops `[BREAK]` markers and reduces phonetic overrides to their word;
   - `check(source: str, prepared: str, substitutions: list[Substitution]) -> list[str]`, which returns problems; an empty list means it passes;
-  - `MAX_SUBSTITUTIONS = 25`, `MAX_SPOKEN_WORDS = 6`, `MAX_EXTRA_WORDS = 3`.
+  - `added_words_limit(source_words: int) -> int`, how many words all the substitutions together may add to the prepared text: `max(MAX_ADDED_WORDS, ceil(ADDED_WORDS_FRACTION * source_words))`;
+  - `MAX_SUBSTITUTIONS = 25`, `MAX_SPOKEN_WORDS = 6`, `MAX_EXTRA_WORDS = 3` (per declaration), `MAX_ADDED_WORDS = 20`, `ADDED_WORDS_FRACTION = 0.02` (across the text, over every applied occurrence).
 
 - [ ] **Step 1: Write the failing tests:**
 
 ```python
-from hypothesis import given, settings, strategies as st
+from hypothesis import assume, given, settings, strategies as st
 
-from narration.words import Substitution, check, words
+from narration.words import Substitution, added_words_limit, check, words
 
 ARTICLE = "Pope Leo XIV met the Pengelley family in State College.\n\nIt went well -- mostly."
 
@@ -187,6 +188,23 @@ def test_smuggling_words_through_a_substitution_is_refused():
     prepared = ARTICLE.replace("the Pengelley", "buy crypto now at the Pengelley")
     problems = check(ARTICLE, prepared, [Substitution("the", "buy crypto now at the")])
     assert any("too long" in p for p in problems)
+
+
+def test_a_short_substitution_applied_everywhere_cannot_inject_many_words():
+    # Within the per-declaration bounds (3 extra words), but applied at all 30 "the"s.
+    article = " ".join(["The dog saw the cat."] * 15)
+    prepared = article.replace("the ", "buy crypto now the ").replace("The ", "Buy crypto now the ")
+    problems = check(article, prepared, [Substitution("the", "buy crypto now the")])
+    assert len(problems) == 1
+    assert "applied 30 times" in problems[0] and "adds 90 words" in problems[0] and "limit is 20" in problems[0]
+
+
+def test_respellings_and_a_few_expansions_stay_within_the_added_words_limit():
+    article = " ".join(["Pengelley met the Pope."] * 30 + ["Pope Leo XIV spoke."] * 5)
+    prepared = article.replace("Pengelley", "Pengelly").replace("XIV", "the Fourteenth")
+    subs = [Substitution("Pengelley", "Pengelly"),   # applied 30 times, adds no words
+            Substitution("XIV", "the Fourteenth")]   # applied 5 times, adds 5 words
+    assert check(article, prepared, subs) == []
 
 
 def test_substitution_original_must_be_in_the_article():
@@ -264,9 +282,13 @@ def test_property_allowed_edits_and_declared_substitutions_pass(data, paras):
         spoken = " ".join(data.draw(st.lists(st.sampled_from(SPOKEN), min_size=1, max_size=3)))
         subs.append(Substitution(w, spoken))
         mapping[w] = spoken
-    # Apply each substitution to a random subset of its occurrences.
+    # Apply each substitution to a random subset of its occurrences, within the
+    # added-words budget (each original is one word, so an application adds
+    # len(spoken) - 1 words).
     replaced = [[(mapping[w] if w in mapping and data.draw(st.booleans()) else w) for w in p]
                 for p in paras]
+    added = sum(len(w.split()) - 1 for p in replaced for w in p)
+    assume(added <= added_words_limit(sum(len(p) for p in paras)))
     replaced = [" ".join(p).split() for p in replaced]
     prepared = data.draw(formatted(replaced))
     assert check(render(paras), prepared, subs) == []
@@ -303,11 +325,15 @@ here. Markdown is stripped by text_to_speech.clean_markdown_text, the same
 function the CLI and KokoroEngine run before generating audio, so this check
 sees exactly the words that will be spoken. Every change to the words
 themselves must be declared as a Substitution, and declared substitutions are
-bounded so they can't carry new content.
+bounded so they can't carry new content: each one is short, and all of them
+together may add only a few words across the whole text, however many times
+each is applied.
 """
 from __future__ import annotations
 
 import difflib
+import heapq
+import math
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -315,8 +341,10 @@ from dataclasses import dataclass
 from text_to_speech import clean_markdown_text
 
 MAX_SUBSTITUTIONS = 25
-MAX_SPOKEN_WORDS = 6
-MAX_EXTRA_WORDS = 3
+MAX_SPOKEN_WORDS = 6         # per declaration
+MAX_EXTRA_WORDS = 3          # per declaration: spoken words beyond the original's
+MAX_ADDED_WORDS = 20         # across the text: words all the applied substitutions add,
+ADDED_WORDS_FRACTION = 0.02  # or this share of the article's words, whichever is larger
 _MAX_STATES_FACTOR = 50
 
 _PHONETIC = re.compile(r"\[([^\]]+)\]\(/[^)]*/\)")
@@ -327,6 +355,11 @@ _TOKEN = re.compile(r"[^\W_]+(?:'[^\W_]+)*")
 class Substitution:
     original: str  # the article's words
     spoken: str    # what the prepared text says in their place
+
+
+def added_words_limit(source_words: int) -> int:
+    """How many words all the substitutions together may add to the prepared text."""
+    return max(MAX_ADDED_WORDS, math.ceil(ADDED_WORDS_FRACTION * source_words))
 
 
 def words(text: str) -> list[str]:
@@ -351,12 +384,12 @@ def check(source: str, prepared: str, substitutions: list[Substitution]) -> list
     if problems:
         return problems
     pairs = [(tuple(words(s.original)), tuple(words(s.spoken))) for s in substitutions]
-    aligned = _aligns(src, prep, pairs)
-    if aligned is True:
-        return []
-    if aligned is None:
+    applied = _align(src, prep, pairs)
+    if applied is None:
         return ["could not align the prepared text with the article (too many alternatives)"]
-    return _describe(src, prep)
+    if applied is False:
+        return _describe(src, prep)
+    return _check_added_words(src, substitutions, pairs, applied)
 
 
 def _check_substitutions(src: list[str], subs: list[Substitution]) -> list[str]:
@@ -385,27 +418,59 @@ def _contains(seq: list[str], sub: list[str]) -> bool:
     return any(seq[i:i + n] == sub for i in range(len(seq) - n + 1))
 
 
-def _aligns(src, prep, pairs):
-    """True if prep is src with some occurrences of each pair's original replaced
-    by its spoken form. Explores all alternatives (prefix-sharing pairs need it);
-    returns None if the search grows past a bound instead of running away."""
+def _check_added_words(src, subs, pairs, applied):
+    """Across the whole text, the applied substitutions may add only a few words."""
+    limit = added_words_limit(len(src))
+    added = [n * max(0, len(sp) - len(o)) for n, (o, sp) in zip(applied, pairs)]
+    total = sum(added)
+    if total <= limit:
+        return []
+    detail = "; ".join(
+        f"substitution {s.original!r} -> {s.spoken!r} is applied {n} time{'s' if n != 1 else ''} "
+        f"and adds {a} words" for s, n, a in zip(subs, applied, added) if a)
+    return [f"the substitutions add {total} words to the article's {len(src)}; the limit is {limit}: "
+            f"{detail}. Shorten or drop them"]
+
+
+def _align(src, prep, pairs):
+    """Align prep to src: prep must be src with some occurrences of each pair's
+    original replaced by its spoken form. Returns how many occurrences each pair
+    is applied to, for the alignment that adds the fewest words; False if there
+    is none; None if the search grows past a bound instead of running away.
+
+    Explores all alternatives (prefix-sharing pairs need it). Every step moves
+    forward in both texts, so settling states in (i, j) order settles each one
+    after all of its predecessors, and the cheapest path to each is exact."""
     n, m = len(src), len(prep)
     limit = _MAX_STATES_FACTOR * (n + m) + 1000
-    stack, seen = [(0, 0)], set()
-    while stack:
-        i, j = stack.pop()
-        if (i, j) in seen:
+    extra = [max(0, len(sp) - len(o)) for o, sp in pairs]
+    best = {(0, 0): (0, None, None)}  # state -> (words added so far, previous state, pair index)
+    heap, done = [(0, 0)], set()
+    while heap:
+        i, j = heapq.heappop(heap)
+        if (i, j) in done:
             continue
-        seen.add((i, j))
-        if len(seen) > limit:
+        done.add((i, j))
+        if len(done) > limit:
             return None
         if i == n and j == m:
-            return True
+            counts, state = [0] * len(pairs), (n, m)
+            while state != (0, 0):
+                _, state, k = best[state]
+                if k is not None:
+                    counts[k] += 1
+            return counts
+        cost = best[(i, j)][0]
+        steps = []
         if i < n and j < m and src[i] == prep[j]:
-            stack.append((i + 1, j + 1))
-        for o, s in pairs:
-            if tuple(src[i:i + len(o)]) == o and tuple(prep[j:j + len(s)]) == s:
-                stack.append((i + len(o), j + len(s)))
+            steps.append((i + 1, j + 1, 0, None))
+        for k, (o, sp) in enumerate(pairs):
+            if tuple(src[i:i + len(o)]) == o and tuple(prep[j:j + len(sp)]) == sp:
+                steps.append((i + len(o), j + len(sp), extra[k], k))
+        for ni, nj, c, k in steps:
+            if (ni, nj) not in best or cost + c < best[(ni, nj)][0]:
+                best[(ni, nj)] = (cost + c, (i, j), k)
+                heapq.heappush(heap, (ni, nj))
     return False
 
 
@@ -681,7 +746,7 @@ class WorkItemStore:
   - `G2P.phonemes(word: str) -> str`;
   - `Converter.to_mp3(wav: Path, mp3: Path, title: str, artist: str, album: str) -> None`.
 - Produces: the real adapters `KokoroEngine`, `GeminiVerifier`, `MisakiG2P` and `Mp3Converter`, and the fakes `FakeTTS`, `FakeVerifier`, `FakeG2P` and `FakeConverter`.
-- Produces: `ToolError(Exception)`; `MAX_RECORDS = 4`; `MAX_CHECKS = 8`.
+- Produces: `ToolError(Exception)`; `MAX_RECORDS = 4`; `MAX_CHECKS = 8`; `ISSUE_KINDS = ("mispronunciation", "pacing", "artifact", "truncation", "other")`; `WHERE_RE`, a timestamp from `m:ss` to `mmm:ss`; `MAX_ISSUES = 20`; `MAX_NOTE = 80`.
 - Every `AgentTools` method holds the item's lock (`store.item_lock`) for the whole call, and refuses with `ToolError` if another call holds it. `record` runs the engine on a temp path in the item's folder and moves the file to `recording.wav` only on success, then sets `state["recorded_round"]`; `check` and `finish` refuse while `recorded_round` lags `records`.
 - `FakeTTS` has `calls`, `fail_next` (the next run writes a partial file, then raises) and `hold` (a `(started, release)` pair of `threading.Event`s; when set, a run blocks between them, for the concurrency tests).
 - Produces: `AgentTools(store, tts, verifier, g2p, default_voice="af_heart")`, with these methods, each taking `item_id: str` first:
@@ -692,9 +757,9 @@ class WorkItemStore:
   - `phonemes(word) -> dict`;
   - `finish(outcome, remaining_issues: list[dict], substitutions: list[dict]) -> dict`.
 
-  Shapes:
-  - an issue is `{"kind": str, "where": str, "note": str}`;
-  - a substitution is `{"original": str, "spoken": str, "why": str}`.
+  Shapes (the result contract; `finish` refuses anything else, and `app.py`'s pydantic models publish the same rules in the tool's schema):
+  - an issue is `{"kind": <one of ISSUE_KINDS>, "where": "<m:ss>", "note": <str of at most 80 characters>}`, and there are at most 20. The episode notes publish only `kind` and `where` (Task 5); `note` is free text for Brian, and stays in `result.json`;
+  - a substitution is `{"original": str, "spoken": str, "why": str}`. The spec's example writes the first two keys as `from` and `to`; `from` is a Python keyword, so it can't be a plain pydantic field or tool argument, and the plans use `original` and `spoken` everywhere (recorded in the roadmap under "Changes the plans make to the spec").
 
 - [ ] **Step 1: Write the failing tests:**
 
@@ -839,7 +904,7 @@ def test_finish_refuses_clean_with_precheck_warnings(env):
     tools.record(item); tools.check(item)
     with pytest.raises(ToolError, match="pre-check"):
         tools.finish(item, "clean", [], [])
-    assert tools.finish(item, "hold", [{"kind": "truncated", "where": "end", "note": "short"}], [])["ok"]
+    assert tools.finish(item, "hold", [{"kind": "truncation", "where": "9:40", "note": "short"}], [])["ok"]
 
 
 def test_finish_refuses_undeclared_changes_and_accepts_declared(env):
@@ -870,8 +935,16 @@ def test_finish_validates_shapes(env):
     tools.record(item); tools.check(item)
     with pytest.raises(ToolError):
         tools.finish(item, "great", [], [])
-    with pytest.raises(ToolError):
-        tools.finish(item, "minor", [{"kind": "x" * 500, "where": "", "note": ""}], [])
+    ok = {"kind": "mispronunciation", "where": "12:40", "note": "Pengelley"}
+    for bad in ({**ok, "kind": "garbled"},          # kind comes from a fixed list
+                {**ok, "where": "near the end"},   # where is a timestamp
+                {**ok, "where": "1234:00"},
+                {**ok, "note": "x" * 81}):         # note is short, and never published
+        with pytest.raises(ToolError):
+            tools.finish(item, "minor", [bad], [])
+    with pytest.raises(ToolError, match="at most 20"):
+        tools.finish(item, "minor", [ok] * 21, [])
+    assert tools.finish(item, "minor", [ok], [])["ok"]
 
 
 @settings(max_examples=100, deadline=None)
@@ -1078,7 +1151,13 @@ MAX_CHECKS = 8
 OUTCOMES = ("clean", "minor", "hold")
 VOICE_RE = re.compile(r"^[a-z]{2}_[a-z]{2,20}$")
 MAX_FIELD = 200
-MAX_ISSUES = 50
+# An issue is a kind from this list, a timestamp, and a short note. Only the kind
+# and the timestamp reach the published episode notes (gate.notes_for); the note
+# is for Brian, in result.json. So no text a session writes can land in the feed.
+ISSUE_KINDS = ("mispronunciation", "pacing", "artifact", "truncation", "other")
+WHERE_RE = re.compile(r"^\d{1,3}:\d{2}$")
+MAX_ISSUES = 20
+MAX_NOTE = 80
 MAX_NEW_TEXT = 20_000
 
 
@@ -1086,10 +1165,19 @@ class ToolError(Exception):
     """A refusal the agent can act on. Its message is shown to the agent."""
 
 
-def _short(value, field):
-    if not isinstance(value, str) or len(value) > MAX_FIELD:
-        raise ToolError(f"{field} must be a string of at most {MAX_FIELD} characters")
+def _short(value, field, limit=MAX_FIELD):
+    if not isinstance(value, str) or len(value) > limit:
+        raise ToolError(f"{field} must be a string of at most {limit} characters")
     return value
+
+
+def _issue(i):
+    kind, where = i.get("kind"), i.get("where")
+    if kind not in ISSUE_KINDS:
+        raise ToolError(f"an issue's kind must be one of {ISSUE_KINDS}; got {kind!r}")
+    if not isinstance(where, str) or not WHERE_RE.match(where):
+        raise ToolError(f"an issue's where must be a timestamp like 12:40; got {where!r}")
+    return {"kind": kind, "where": where, "note": _short(i.get("note", ""), "note", MAX_NOTE)}
 
 
 def _locked(method):
@@ -1195,8 +1283,7 @@ class AgentTools:
             raise ToolError(f"outcome must be one of {OUTCOMES}")
         if not isinstance(remaining_issues, list) or len(remaining_issues) > MAX_ISSUES:
             raise ToolError(f"remaining_issues must be a list of at most {MAX_ISSUES}")
-        issues = [{"kind": _short(i.get("kind"), "kind"), "where": _short(i.get("where", ""), "where"),
-                   "note": _short(i.get("note", ""), "note")} for i in remaining_issues]
+        issues = [_issue(i) for i in remaining_issues]
         subs_in = [{"original": _short(s.get("original"), "original"),
                     "spoken": _short(s.get("spoken"), "spoken"),
                     "why": _short(s.get("why", ""), "why")} for s in substitutions]
@@ -1240,6 +1327,7 @@ class AgentTools:
 - Consumes: `WorkItemStore`, `words.check`, `Converter`, `ToolError` (Task 4).
 - Produces: `GateResult(action: str, outcome: str | None, reasons: list[str], notes: str)`, where `action` is `"publish"`, `"hold"` or `"retry"`.
 - Produces: `evaluate(state: dict, source: str, prepared: str, metadata: dict) -> GateResult`.
+- Produces: `notes_for(metadata: dict, finish: dict) -> str`, the published episode notes: the description; each remaining issue as `- <where> <kind>`, never its free-text `note`, which is for Brian and stays in `result.json`; each substitution; "Recorded automatically."
 - Produces: `RunnerTools(store, converter)`, with:
   - `.open(article_text: str, metadata: dict) -> dict`, returning `{"item_id", "agent_token"}`;
   - `.finalize(item_id: str, force: bool = False) -> dict`, returning `{"action", "outcome", "reasons", "notes", "mp3": bool}`. It waits for the item's lock, so it can't interleave with a running `record`. An item that is still `open` is refused with `ToolError` unless `force=True`, which revokes the token, sets the status to `abandoned` and returns `action: "retry"`; the runner passes `force=True` only after its own session timeout (Plan 3);
@@ -1253,6 +1341,7 @@ class AgentTools:
 - [ ] **Step 1: Write the failing tests:**
 
 ```python
+import json
 import threading
 
 import pytest
@@ -1324,19 +1413,23 @@ def test_clean_publishes_with_tags_and_notes(env):
     assert store.path(item, "episode.mp3").exists()
 
 
-def test_minor_lists_issues_and_substitutions_in_the_notes(env):
+def test_minor_lists_issues_in_the_notes_but_never_their_free_text(env):
     store, runner, tools, conv, item, _ = env
     tools.record(item); tools.check(item)
-    tools.finish(item, "minor", [{"kind": "mispronunciation", "where": "0:12", "note": "Lawler"}], [])
+    tools.finish(item, "minor", [{"kind": "mispronunciation", "where": "0:12",
+                                  "note": "Lawler; see example.com"}], [])
     out = runner.finalize(item)
     assert out["action"] == "publish"
-    assert "0:12" in out["notes"] and "Lawler" in out["notes"]
+    assert "- 0:12 mispronunciation" in out["notes"]
+    assert "example.com" not in out["notes"]  # the note is for Brian, not the feed ...
+    result = json.loads(store.read_text(item, "result.json"))
+    assert result["remaining_issues"][0]["note"] == "Lawler; see example.com"  # ... so it's in result.json
 
 
 def test_agent_hold_is_a_hold(env):
     _, runner, tools, conv, item, _ = env
     tools.record(item); tools.check(item)
-    tools.finish(item, "hold", [{"kind": "garbled", "where": "3:00", "note": "paragraph 4"}], [])
+    tools.finish(item, "hold", [{"kind": "artifact", "where": "3:00", "note": "paragraph 4"}], [])
     out = runner.finalize(item)
     assert out["action"] == "hold" and conv.calls == []
     assert any("paragraph 4" in r for r in out["reasons"])
@@ -1399,11 +1492,13 @@ def album_for(metadata: dict) -> str:
 
 
 def notes_for(metadata: dict, finish: dict) -> str:
+    """The published episode notes. An issue appears as its timestamp and kind only:
+    finish checked both against a pattern and a fixed list, so no text the session
+    wrote reaches the feed. The free-text note is for Brian, in result.json."""
     parts = [metadata.get("description", "").strip()]
     if finish.get("remaining_issues"):
         parts.append("Known issues in this recording:")
-        parts += [f"- {i['where']} {i['kind']}: {i['note']}".replace("-  ", "- ")
-                  for i in finish["remaining_issues"]]
+        parts += [f"- {i['where']} {i['kind']}" for i in finish["remaining_issues"]]
     if finish.get("substitutions"):
         parts.append("Read with these substitutions:")
         parts += [f"- \"{s['original']}\" read as \"{s['spoken']}\"" for s in finish["substitutions"]]
@@ -1740,6 +1835,26 @@ def test_a_premature_finalize_is_refused_with_its_reason(client):
     assert store.item_for_token(token) == item  # nothing was revoked
 
 
+def test_finish_schema_closes_the_issue_fields(client):
+    # kind and where are what the episode notes publish, so the agent's schema pins
+    # them down, and a value off the list is refused with the reason.
+    c, store = client
+    _, token = store.open("x", {})
+    hdr = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json",
+           "Authorization": f"Bearer {token}"}
+    tools = c.post("/agent/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+                   headers=hdr).json()["result"]["tools"]
+    schema = next(t for t in tools if t["name"] == "finish")["inputSchema"]
+    assert schema["properties"]["remaining_issues"]["maxItems"] == 20
+    issue = schema["$defs"]["Issue"]["properties"]
+    assert issue["kind"]["enum"] == ["mispronunciation", "pacing", "artifact", "truncation", "other"]
+    assert issue["where"]["pattern"] == r"^\d{1,3}:\d{2}$" and issue["note"]["maxLength"] == 80
+    bad = {"outcome": "minor", "remaining_issues": [{"kind": "garbled", "where": "3:00", "note": ""}]}
+    r = c.post("/agent/mcp", json={"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                                   "params": {"name": "finish", "arguments": bad}}, headers=hdr).json()["result"]
+    assert r["isError"] is True and "'mispronunciation'" in r["content"][0]["text"]
+
+
 def test_real_engines_need_a_gemini_key_at_startup(tmp_path, monkeypatch):
     from narration.__main__ import main
     (tmp_path / "runner-token").write_text("runner-secret\n")
@@ -1763,7 +1878,7 @@ def test_real_engines_need_a_gemini_key_at_startup(tmp_path, monkeypatch):
 from __future__ import annotations
 
 import contextlib
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field
 from starlette.applications import Starlette
@@ -1788,9 +1903,13 @@ AGENT_INSTRUCTIONS = (
 
 
 class Issue(BaseModel):
-    kind: str = Field(max_length=200)
-    where: str = Field(default="", max_length=200)
-    note: str = Field(default="", max_length=200)
+    """A remaining issue. kind and where are what the episode notes publish, so both
+    are closed forms (a fixed list; a timestamp) that the tool's schema shows the
+    agent. note is free text for Brian, in result.json only. agent_tools has the
+    same rules (ISSUE_KINDS, WHERE_RE, MAX_NOTE), and its finish enforces them too."""
+    kind: Literal["mispronunciation", "pacing", "artifact", "truncation", "other"]
+    where: str = Field(pattern=r"^\d{1,3}:\d{2}$", description="a timestamp in the recording, m:ss")
+    note: str = Field(default="", max_length=80)
 
 
 class SubstitutionIn(BaseModel):
@@ -1850,8 +1969,15 @@ def build_app(store, agent_tools, runner_tools, runner_token, allowed_hosts):
 
     @agent.tool()
     def finish(outcome: Literal["clean", "minor", "hold"], ctx: Context,
-               remaining_issues: list[Issue] = [], substitutions: list[SubstitutionIn] = []) -> dict:
-        """End the session. outcome: clean, minor (issues listed), or hold (content missing or garbled)."""
+               remaining_issues: Annotated[list[Issue], Field(max_length=20)] = [],
+               substitutions: list[SubstitutionIn] = []) -> dict:
+        """End the session. outcome: clean, minor (issues listed), or hold (content
+        missing or garbled). remaining_issues: at most 20, each with a kind from
+        mispronunciation, pacing, artifact, truncation and other; a where that is a
+        timestamp like 12:40; and a note of at most 80 characters for Brian. The
+        published episode notes carry only the kind and the timestamp, never the note.
+        substitutions: every word change in the prepared text, as original, spoken and
+        why. Each is short, and all of them together may add only a few words."""
         return run(agent_tools.finish, item(ctx), outcome,
                    [i.model_dump() for i in remaining_issues],
                    [s.model_dump() for s in substitutions])
@@ -2089,5 +2215,5 @@ curl -s http://(tailscale ip -4):8770/health      # {"ok":true}
 - [ ] **Step 4: Commit:** "narration: launchd template and install doc".
 - [ ] **Step 5: Open the PR** with `reviewed:none`, and run the review tier the spec calls for. This is new code in no daily-use path, so a single review on the session's model is enough. Its description says:
   - "What breaks if wrong: nothing yet. Nothing calls this server until Plan 3's runner exists. On the Mac it's one LaunchAgent; `launchctl bootout gui/$(id -u)/net.robergb.narration` removes it";
-  - the per-item token refinement;
+  - the two refinements to the spec: the per-item token, and `original`/`spoken` as the substitution keys;
   - the light test command.
