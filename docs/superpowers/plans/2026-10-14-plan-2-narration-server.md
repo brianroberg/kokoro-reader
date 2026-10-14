@@ -37,11 +37,12 @@ Agent tokens are per work item: the runner's `open` call mints one, and `finish`
 
   ```bash
   uv run --no-project --with "mcp==2.3.0" --with uvicorn --with httpx --with hypothesis --with pytest \
-    --with numpy --with soundfile --with pydub --with google-genai --with python-dotenv \
+    --with numpy --with soundfile --with pydub --with "audioop-lts; python_version >= '3.13'" \
+    --with google-genai --with python-dotenv \
     python -m pytest tests/narration tests/test_verify_audio.py -q
   ```
 
-  This works in Linux containers, where `uv sync` of the full project would pull in torch and CUDA. Call this the **light test command** below. It includes numpy, soundfile and pydub because `verify_audio.py` and `narration/words.py` import `text_to_speech.py`, whose `mlx_audio` import is guarded.
+  This works in Linux containers, where `uv sync` of the full project would pull in torch and CUDA. Call this the **light test command** below. It includes numpy, soundfile and pydub because `verify_audio.py` and `narration/words.py` import `text_to_speech.py`, whose `mlx_audio` import is guarded. It includes `audioop-lts` because pydub imports the stdlib `audioop` module, which Python 3.13 removed, and uv's default interpreter is 3.13; the marker skips it on 3.12 and older, where `audioop-lts` has no release and the stdlib module still exists.
 
 ## Review Focus
 
@@ -2111,9 +2112,10 @@ RT="$(cat "$W/runner-token")"
 NARRATION_DATA_DIR="$W/data" NARRATION_RUNNER_TOKEN_FILE="$W/runner-token" NARRATION_PORT=8771 \
 NARRATION_ALLOWED_HOSTS="127.0.0.1:8771" \
   uv run --no-project --with "mcp==2.3.0" --with uvicorn --with hypothesis --with pydantic \
-  --with numpy --with soundfile --with pydub \
+  --with numpy --with soundfile --with pydub --with "audioop-lts; python_version >= '3.13'" \
   python -m narration --fake-engines > "$W/server.log" 2>&1 & SERVER=$!
 # numpy, soundfile, pydub: narration.words imports text_to_speech for clean_markdown_text.
+# audioop-lts: pydub needs the audioop module that Python 3.13 removed.
 for i in $(seq 1 30); do curl -sf http://127.0.0.1:8771/health >/dev/null && break; sleep 1; done
 # Open a work item through the runner MCP endpoint, with a tiny python client using the same SDK.
 OPEN=$(uv run --no-project --with "mcp==2.3.0" python tests/narration/smoke_open.py "$RT")
