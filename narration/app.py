@@ -139,7 +139,8 @@ def build_app(store, agent_tools, runner_tools, runner_token, allowed_hosts: lis
     @agent.tool()
     def record(ctx: Context, voice: Voice = agent_tools.default_voice, speed: Speed = 1.0) -> dict:
         """Generate audio from the prepared text as it is now. At most four rounds per
-        article; a round counts even if the engine fails. Returns round,
+        article; a round counts even if the engine fails. Refused once no checks are
+        left, since a new round could not be checked. Returns round,
         duration_seconds, records_left and speech_warnings: places where the engine
         would say something the article doesn't. Read speech_warnings before spending
         a check: finish refuses the same mismatches, so fix them with replace_text and

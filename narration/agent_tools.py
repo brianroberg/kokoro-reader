@@ -154,8 +154,13 @@ def _checks_used(state: dict) -> int:
 
 def _changed(state: dict) -> str:
     n = state["records"]
-    tail = ("record again, or undo the edit" if n < MAX_RECORDS
-            else "undo the edit (no record rounds are left), or finish with outcome 'hold'")
+    if n >= MAX_RECORDS:
+        tail = "undo the edit (no record rounds are left), or finish with outcome 'hold'"
+    elif _checks_used(state) >= MAX_CHECKS:  # a new recording could never be checked
+        tail = ("undo the edit (no checks are left to verify a new recording), or finish "
+                "with outcome 'hold'")
+    else:
+        tail = "record again, or undo the edit"
     return f"the prepared text changed since round {n} was recorded; {tail}"
 
 
@@ -308,6 +313,11 @@ class AgentTools:
         if state["records"] >= MAX_RECORDS:
             raise ToolError(f"record limit reached ({MAX_RECORDS} per article); "
                             + self._what_next(item_id, state))
+        if _checks_used(state) >= MAX_CHECKS:
+            # A new round could never be checked, so it could only replace audio that may
+            # have been checked clean.
+            raise ToolError(f"no checks are left to verify a new recording ({MAX_CHECKS} per "
+                            "article); " + self._what_next(item_id, state))
         text = self.store.read_text(item_id, "prepared.md")
         # finish refuses speech the article doesn't have; say so now, before the round
         # is spent, without refusing. Imported here: the gate imports this module.
@@ -427,9 +437,12 @@ def recording_claims(state: dict, prepared: str) -> list[str]:
                         else f"call check on the latest recording before finish; or {hold}")
     elif latest[-1]["warnings"]:
         flagged = "; ".join(latest[-1]["warnings"]).rstrip(".")
-        advice = ("Fix and re-record, or finish with outcome 'hold'."
-                  if n < MAX_RECORDS and _checks_used(state) < MAX_CHECKS
-                  else "No record round or check is left to fix it: finish with outcome 'hold'.")
+        no_round, no_check = n >= MAX_RECORDS, _checks_used(state) >= MAX_CHECKS
+        advice = ("No record round or check is left to fix it" if no_round and no_check
+                  else "No record round is left to fix it" if no_round
+                  else "No check is left to verify a fix" if no_check else "")
+        advice = (f"{advice}: finish with outcome 'hold'." if advice
+                  else "Fix and re-record, or finish with outcome 'hold'.")
         problems.append(f"the latest check's pre-check flagged: {flagged}. {advice}")
     return problems
 

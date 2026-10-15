@@ -656,17 +656,75 @@ def test_when_the_last_record_fails_the_messages_offer_hold(env):
 
 
 def test_when_checks_run_out_before_a_new_recording_the_messages_offer_hold(env):
+    store, tools, _, ver, item, _ = env
+    tools.record(item)
+    for _ in range(agent_tools.MAX_CHECKS - 1):
+        tools.check(item)
+    tools.record(item)
+    real, ver.check = ver.check, lambda audio_path, text: (_ for _ in ()).throw(
+        RuntimeError("verification failed: 503 UNAVAILABLE"))
+    with pytest.raises(RuntimeError):
+        tools.check(item)  # the last check, counted, and round 2 is never checked
+    ver.check = real
+    with pytest.raises(ToolError, match=r"check limit reached \(8 per article\); "
+                                        r"finish with outcome 'hold'$"):
+        tools.check(item)
+    with pytest.raises(ToolError, match=r"no checks are left to verify a new recording "
+                                        r"\(8 per article\); finish with outcome 'hold'$"):
+        tools.record(item)
+    with pytest.raises(ToolError, match="no checks are left; finish with outcome 'hold'"):
+        tools.finish(item, "clean", [], [])
+    assert tools.finish(item, "hold", [ISSUE], [])["ok"]
+
+
+# M1 (final review): with no checks left, a new recording could never be checked, so
+# record is refused rather than replacing a round that was checked clean
+def test_record_is_refused_once_no_checks_are_left_and_the_checked_round_stands(env):
+    store, tools, tts, _, item, _ = env
+    tools.record(item)
+    for _ in range(agent_tools.MAX_CHECKS):
+        tools.check(item)
+    with pytest.raises(ToolError, match=re.escape(
+            "no checks are left to verify a new recording (8 per article); finish with "
+            "outcome clean or minor; or finish with outcome 'hold'")):
+        tools.record(item)
+    assert store.load_state(item)["records"] == 1 and tts.calls == 1  # no round spent
+    assert tools.finish(item, "clean", [], [])["ok"]  # round 1, checked clean
+
+
+def test_an_edit_with_no_checks_left_is_not_told_to_record_again(env):
     store, tools, _, _, item, _ = env
     tools.record(item)
     for _ in range(agent_tools.MAX_CHECKS):
         tools.check(item)
-    tools.record(item)
-    with pytest.raises(ToolError, match=r"check limit reached \(8 per article\); "
-                                        r"finish with outcome 'hold'$"):
-        tools.check(item)
-    with pytest.raises(ToolError, match="no checks are left; finish with outcome 'hold'"):
+    tools.replace_text(item, "It went well.", "It went well...")
+    with pytest.raises(ToolError) as refused:
         tools.finish(item, "clean", [], [])
-    assert tools.finish(item, "hold", [ISSUE], [])["ok"]
+    assert str(refused.value) == (
+        "the prepared text changed since round 1 was recorded; undo the edit (no checks are "
+        "left to verify a new recording), or finish with outcome 'hold'")
+    with pytest.raises(ToolError, match=re.escape(
+            "no checks are left to verify a new recording (8 per article); undo the edits "
+            "made since round 1 was recorded, then finish with outcome clean or minor; or "
+            "finish with outcome 'hold'")):
+        tools.record(item)
+    tools.replace_text(item, "It went well...", "It went well.")
+    assert tools.finish(item, "clean", [], [])["ok"]
+
+
+@pytest.mark.parametrize("records, checks, advice", [
+    (1, 1, "Fix and re-record, or finish with outcome 'hold'."),
+    (MAX_RECORDS, 1, "No record round is left to fix it: finish with outcome 'hold'."),
+    (1, agent_tools.MAX_CHECKS, "No check is left to verify a fix: finish with outcome 'hold'."),
+    (MAX_RECORDS, agent_tools.MAX_CHECKS,
+     "No record round or check is left to fix it: finish with outcome 'hold'."),
+])
+def test_the_precheck_refusal_says_which_limit_is_spent(records, checks, advice):
+    state = {"records": records, "recorded_round": records, "recorded_sha256": _sha(ARTICLE),
+             "checks_used": checks,
+             "checks": [{"n": checks, "record": records, "warnings": ["pace of 40 WPM"]}]}
+    assert agent_tools.recording_claims(state, ARTICLE) == [
+        f"the latest check's pre-check flagged: pace of 40 WPM. {advice}"]
 
 
 def test_the_limit_messages_say_what_can_still_be_done(env):
