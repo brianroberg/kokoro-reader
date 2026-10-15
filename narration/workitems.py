@@ -10,17 +10,20 @@ tool holds for a whole call.
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
 import re
 import secrets
+import shutil
 import tempfile
 import threading
 from pathlib import Path
 
-ID_RE = re.compile(r"^[0-9a-f]{12}$")
-REPORT_RE = re.compile(r"^report-[1-8]\.txt$")
+# Matched with fullmatch: `$` would also accept a trailing newline.
+ID_RE = re.compile(r"[0-9a-f]{12}")
+REPORT_RE = re.compile(r"report-[1-8]\.txt")
 FILES = {"source.md", "prepared.md", "metadata.json", "state.json",
          "recording.wav", "episode.mp3", "result.json"}
 # status: open -> finished (finish) -> finalized (finalize); open -> abandoned (finalize, force=True).
@@ -29,7 +32,13 @@ INITIAL_STATE = {"status": "open", "records": 0, "recorded_round": None, "checks
 
 
 def _hash(token: str) -> str:
-    return hashlib.sha256(token.encode()).hexdigest()
+    # surrogatepass: a lone surrogate (a JSON string can carry one) hashes to a
+    # value that matches nothing, instead of raising.
+    return hashlib.sha256(token.encode("utf-8", "surrogatepass")).hexdigest()
+
+
+def _valid_id(item_id) -> bool:
+    return isinstance(item_id, str) and ID_RE.fullmatch(item_id) is not None
 
 
 def _atomic_write(path: Path, data: bytes) -> None:
@@ -38,6 +47,8 @@ def _atomic_write(path: Path, data: bytes) -> None:
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp, path)
     except BaseException:
         if os.path.exists(tmp):
@@ -55,6 +66,8 @@ class WorkItemStore:
     def item_lock(self, item_id: str) -> threading.Lock:
         """The item's lock. An agent tool holds it for one call and refuses if it's
         taken; finalize waits for it. So one call at a time works on an item."""
+        if not _valid_id(item_id):
+            raise ValueError(f"bad work item id: {item_id!r}")
         with self.lock:
             return self._item_locks.setdefault(item_id, threading.Lock())
 
@@ -67,7 +80,7 @@ class WorkItemStore:
         _atomic_write(self.root / "tokens.json", json.dumps(tokens).encode())
 
     def item_for_token(self, token: str):
-        if not token:
+        if not token or not isinstance(token, str):
             return None
         with self.lock:
             return self._tokens().get(_hash(token))
@@ -79,30 +92,48 @@ class WorkItemStore:
 
     # -- items --
     def open(self, article_text: str, metadata: dict):
-        item_id = secrets.token_hex(6)
+        # Serialize and encode everything first, so bad input fails before any file exists.
+        files = {
+            "source.md": article_text.encode("utf-8"),
+            "prepared.md": article_text.encode("utf-8"),
+            "metadata.json": json.dumps(metadata).encode("utf-8"),
+        }
         token = secrets.token_urlsafe(32)
-        self.write_text(item_id, "source.md", article_text)
-        self.write_text(item_id, "prepared.md", article_text)
-        self.write_text(item_id, "metadata.json", json.dumps(metadata))
-        self.save_state(item_id, dict(INITIAL_STATE))
-        with self.lock:
-            tokens = self._tokens()
-            tokens[_hash(token)] = item_id
-            self._save_tokens(tokens)
+        # mkdir without exist_ok claims a fresh id; the folder is ours to remove on failure.
+        while True:
+            item_id = secrets.token_hex(6)
+            try:
+                (self.root / "items" / item_id).mkdir(parents=True)
+                break
+            except FileExistsError:
+                continue
+        try:
+            for name, data in files.items():
+                _atomic_write(self.path(item_id, name), data)
+            self.save_state(item_id, copy.deepcopy(INITIAL_STATE))
+            with self.lock:
+                tokens = self._tokens()
+                tokens[_hash(token)] = item_id
+                self._save_tokens(tokens)
+        except BaseException:
+            shutil.rmtree(self.root / "items" / item_id, ignore_errors=True)
+            raise
         return item_id, token
 
     def exists(self, item_id: str) -> bool:
-        return bool(ID_RE.match(item_id or "")) and (self.root / "items" / item_id).is_dir()
+        return _valid_id(item_id) and (self.root / "items" / item_id).is_dir()
 
     def path(self, item_id: str, name: str) -> Path:
-        if not ID_RE.match(item_id or ""):
+        if not _valid_id(item_id):
             raise ValueError(f"bad work item id: {item_id!r}")
-        if name not in FILES and not REPORT_RE.match(name):
+        if not isinstance(name, str) or (name not in FILES and REPORT_RE.fullmatch(name) is None):
             raise ValueError(f"unknown work item file: {name!r}")
         return self.root / "items" / item_id / name
 
     def read_text(self, item_id: str, name: str) -> str:
-        return self.path(item_id, name).read_text(encoding="utf-8")
+        # newline="": no newline translation, so text round-trips what write_text wrote.
+        with self.path(item_id, name).open(encoding="utf-8", newline="") as f:
+            return f.read()
 
     def write_text(self, item_id: str, name: str, text: str) -> None:
         _atomic_write(self.path(item_id, name), text.encode("utf-8"))
