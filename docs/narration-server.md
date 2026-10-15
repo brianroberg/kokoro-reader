@@ -87,4 +87,4 @@ uv run --no-project --with "mcp==2.3.0" --with uvicorn --with httpx --with hypot
   python -m pytest tests/narration tests/test_verify_audio.py -q
 ```
 
-`tests/narration/smoke_claude.sh` is a manual end-to-end check, not part of pytest: it starts the server on fake engines (port 8771, or `SMOKE_PORT`), opens a work item, and has a real `claude -p` session with only the six tools record it. It needs `claude` logged in and costs a few cents. Run it with `bash tests/narration/smoke_claude.sh`.
+`tests/narration/smoke_claude.sh` is a manual end-to-end check, not part of pytest: it starts the server on fake engines (port 8771, or `SMOKE_PORT`), opens a work item, and has a real `claude -p` session with only the six tools record it. The session is also asked to run a shell command, read two files and fetch two URLs (the spec's containment probes, plus canaries the script recognises), and the script fails if any got through, if `result.json` does not say outcome `clean`, or if the session's token still works after `finish`. It needs `claude` logged in and costs a few cents. Run it with `bash tests/narration/smoke_claude.sh`.
