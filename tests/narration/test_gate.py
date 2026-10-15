@@ -511,6 +511,43 @@ def test_the_message_quotes_the_words_nearest_the_difference_on_each_side():
     assert "(line 2, near 'costs fell 5% today, as the rest')" in problems[0]
 
 
+# M2 (final review): a mismatch is most often a pause the session added, so the advice
+# says to make the text read as the article does there first, then the override rule
+def test_the_mismatch_advice_puts_the_pause_first():
+    problems = speech_matches(SignG2P(), COSTS, HOLE, [])
+    advice = problems[0][problems[0].index("says '"):]
+    assert "Make the prepared text read as the article does there" in advice
+    pause, override = advice.index("move or remove the pause"), advice.index("phonetic override")
+    assert pause < override
+    assert "instead of changing case or spelling" in advice[override:]
+
+
+# M3, M4 (final review): record's advisory says when it did not compare, and no
+# failure of it (it only advises) stops a record
+def test_speech_warnings_say_when_the_words_differ_and_nothing_was_compared():
+    assert gate.speech_warnings(G2P, ARTICLE, ARTICLE) == []
+    assert gate.speech_warnings(G2P, ARTICLE, ARTICLE + " Buy now.") == [gate.NOT_COMPARED]
+    assert gate.NOT_COMPARED == ("not compared: the prepared text differs from the article in "
+                                 "words; finish compares it with your declared substitutions")
+
+
+@pytest.mark.parametrize("error, shown", [
+    (RuntimeError("the speech comparison failed: espeak is missing"),
+     "the speech comparison could not run: the speech comparison failed: espeak is missing"),
+    (KeyError("/Users/x/secret/path"),
+     "the speech comparison could not run (an internal error, logged on the server)"),
+])
+def test_speech_warnings_turn_any_failure_into_a_logged_warning(caplog, error, shown):
+    class FailingG2P(FakeG2P):
+        def phonemes_for_text(self, text):
+            raise error
+    with caplog.at_level("WARNING", logger="narration.gate"):
+        assert gate.speech_warnings(FailingG2P(), ARTICLE, ARTICLE) == [shown]
+    assert any("speech comparison" in r.getMessage() for r in caplog.records)
+    if not isinstance(error, RuntimeError):
+        assert any(r.exc_info for r in caplog.records)  # the traceback, for Brian
+
+
 def test_evaluate_holds_when_the_engine_would_say_something_else():
     out = evaluate(_state(recorded_sha256=_sha(HOLE)), COSTS, HOLE, META, SignG2P())
     assert out.action == "hold" and any("minus" in r for r in out.reasons)
@@ -755,8 +792,9 @@ def test_a_case_only_edit_the_engine_reads_differently_is_refused_with_override_
     with pytest.raises(ToolError) as refused:
         tools.finish(item, "clean", [], [])
     message = str(refused.value)
-    assert ("The engine reads this differently; if it is a pronunciation change, use a phonetic "
-            "override from phonemes() instead of changing case or spelling.") in message
+    assert ("if the change is for pronunciation, use a phonetic override from phonemes() "
+            "instead of changing case or spelling.") in message
+    assert gate.MISMATCH_ADVICE + "." in message
     assert "declare " not in message and "in substitutions" not in message  # no impossible advice
     assert message.endswith("Then record and check again; or finish with outcome 'hold'.")
 

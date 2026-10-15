@@ -24,6 +24,7 @@ published, so its claims aren't checked, as finish doesn't check them. Pure,
 apart from the G2P it is handed."""
 from __future__ import annotations
 
+import logging
 import os
 import re
 from dataclasses import dataclass, field
@@ -37,10 +38,17 @@ from narration.words import _PHONETIC, Substitution, apply_with_reason, check, e
 _MARKS = frozenset("ˈˌːˑ")
 _AROUND = 20  # phoneme characters shown on each side of a difference
 _NEAR = 3     # words of text quoted on each side of it
-# The advice for a difference where the words agree: the word check folds case, so a
-# substitution can't declare a case or spelling change the engine reads differently.
-OVERRIDE_ADVICE = ("The engine reads this differently; if it is a pronunciation change, use a "
+# The advice for a difference where the words agree. Most often it is a pause the
+# session added (misaki reads some words differently before one), so that comes first.
+# Then the override rule: the word check folds case, so a substitution can't declare
+# a case or spelling change the engine reads differently.
+MISMATCH_ADVICE = ("Make the prepared text read as the article does there (move or remove the "
+                   "pause, if you added one); if the change is for pronunciation, use a "
                    "phonetic override from phonemes() instead of changing case or spelling")
+# What record's advisory says when the words differ, so it compared nothing.
+NOT_COMPARED = ("not compared: the prepared text differs from the article in words; finish "
+                "compares it with your declared substitutions")
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -149,20 +157,25 @@ def speech_matches(g2p, source: str, prepared: str, substitutions: list[Substitu
     return [f"the prepared text would not sound like the article: in line {la} of the prepared "
             f"text, near {wa!r}, the engine would say '{_around(said, pa)}', where the article, "
             f"with the declared substitutions (line {lb}, near {wb!r}), says "
-            f"'{_around(heard, pb)}'. {OVERRIDE_ADVICE}"]
+            f"'{_around(heard, pb)}'. {MISMATCH_ADVICE}"]
 
 
 def speech_warnings(g2p, source: str, prepared: str) -> list[str]:
     """What record warns about before the engine runs: speech_matches, with no
     substitutions, since a session declares them only at finish. Where the words
-    differ there is no warning: finish's word check judges that, with the declared
-    substitutions. A comparison that can't run is a warning too, never a refusal."""
-    if check(source, prepared, []):
-        return []
+    differ nothing is compared, and the warning says so (NOT_COMPARED): finish's word
+    check judges that, with the declared substitutions. It only advises, so nothing
+    it raises stops a record: a comparison that can't run is a warning too, logged."""
     try:
+        if check(source, prepared, []):
+            return [NOT_COMPARED]
         return speech_matches(g2p, source, prepared, [])
-    except RuntimeError as e:  # the G2P adapter's failures
+    except RuntimeError as e:  # the G2P adapter's failures, which keep server paths out
+        log.warning("record's speech comparison could not run: %s", e)
         return [f"the speech comparison could not run: {e}"]
+    except Exception:  # a bug: its message is not for the agent
+        log.exception("record's speech comparison could not run")
+        return ["the speech comparison could not run (an internal error, logged on the server)"]
 
 
 def _near(text: str, phonemes: str, at: int) -> tuple[int, str]:

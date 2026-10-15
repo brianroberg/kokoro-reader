@@ -142,9 +142,11 @@ def build_app(store, agent_tools, runner_tools, runner_token, allowed_hosts: lis
         article; a round counts even if the engine fails. Refused once no checks are
         left, since a new round could not be checked. Returns round,
         duration_seconds, records_left and speech_warnings: places where the engine
-        would say something the article doesn't. Read speech_warnings before spending
-        a check: finish refuses the same mismatches, so fix them with replace_text and
-        record again. speed: 0.5 to 2.0."""
+        would say something the article doesn't (or one entry saying nothing was
+        compared, when the words differ from the article's: finish compares those with
+        your declared substitutions). Read speech_warnings before spending a check:
+        finish refuses the same mismatches, so fix them with replace_text and record
+        again. speed: 0.5 to 2.0."""
         return run(agent_tools.record, item(ctx), voice, speed)
 
     @agent.tool()

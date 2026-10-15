@@ -991,12 +991,26 @@ def test_record_warns_about_a_sign_only_change_and_still_records(tmp_path):
     assert "phonetic override" in out["speech_warnings"][0]
 
 
-def test_record_does_not_warn_about_word_changes_finish_will_judge(tmp_path):
+def test_record_says_it_did_not_compare_word_changes_finish_will_judge(tmp_path):
+    from narration.gate import NOT_COMPARED
     store = WorkItemStore(tmp_path)
     tools = AgentTools(store, FakeTTS(), FakeVerifier(), SignG2P())
     item, _ = store.open("Pope Leo XIV met.", {})
     tools.replace_text(item, "XIV", "the Fourteenth")  # declared only at finish
-    assert tools.record(item)["speech_warnings"] == []
+    assert tools.record(item)["speech_warnings"] == [NOT_COMPARED]
+
+
+def test_record_records_whatever_the_advisory_raises(tmp_path):
+    class BuggyG2P(FakeG2P):
+        def phonemes_for_text(self, text):
+            raise KeyError("a bug")
+    store = WorkItemStore(tmp_path)
+    tts = FakeTTS()
+    tools = AgentTools(store, tts, FakeVerifier(), BuggyG2P())
+    item, _ = store.open("Costs fell 5% today.", {})
+    out = tools.record(item)
+    assert tts.calls == 1 and out["round"] == 1 and len(out["speech_warnings"]) == 1
+    assert "could not run" in out["speech_warnings"][0]
 
 
 def test_record_warns_when_the_comparison_cannot_run_and_records_anyway(tmp_path):
