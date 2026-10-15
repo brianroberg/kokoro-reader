@@ -14,6 +14,7 @@ from verify_audio import (
     verify_audio,
     main,
     precheck_report,
+    precheck_warnings,
     format_timestamp,
     find_section_gaps,
     split_audio_at_gaps,
@@ -148,6 +149,21 @@ class TestVerifyAudio:
         verify_audio(audio_path, "Some text.", model="gemini-2.5-pro")
         call_args = mock_client.models.generate_content.call_args
         assert call_args.kwargs.get("model") == "gemini-2.5-pro" or "gemini-2.5-pro" in str(call_args)
+
+    @patch("verify_audio.genai")
+    def test_uses_audio_already_decoded_by_the_caller(self, mock_genai, tmp_path):
+        """A caller that decoded the WAV (for its own pre-check) passes it in;
+        verify_audio then reads the file only to upload it."""
+        mock_gemini_client(mock_genai, "No issues found.")
+        audio_path = make_wav(tmp_path / "audio.wav", [("tone", 4000)])
+        decoded = AudioSegment.from_wav(audio_path)
+
+        with patch("verify_audio.AudioSegment.from_wav", side_effect=AssertionError("decoded twice")):
+            result = verify_audio(audio_path, "one two three four five six seven eight nine ten",
+                                  audio=decoded)
+
+        assert result.startswith("## Pre-check") and "0:04" in result
+        assert "No issues found." in result
 
     @patch("verify_audio.genai")
     def test_report_starts_with_precheck(self, mock_genai, tmp_path):
@@ -557,3 +573,17 @@ class TestCLI:
 
         with pytest.raises(SystemExit):
             main([audio_path, "/nonexistent/text.txt"])
+
+
+def test_precheck_warnings_lists_pace_and_long_silence():
+    audio = make_segment([("tone", 1000), ("silence", 6000), ("tone", 1000)])
+    text = " ".join(["word"] * 400)  # far too many words for 8 s of audio
+    warnings = precheck_warnings(audio, text)
+    assert any("WPM" in w for w in warnings)
+    assert any("of silence at" in w for w in warnings)
+
+
+def test_precheck_warnings_empty_for_normal_audio():
+    audio = make_segment([("tone", 60000)])
+    text = " ".join(["word"] * 160)  # 160 WPM
+    assert precheck_warnings(audio, text) == []
