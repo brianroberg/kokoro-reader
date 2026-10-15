@@ -563,7 +563,8 @@ def test_misaki_hears_a_sign_the_word_check_misses():
 # ---- fix round 1 ----
 # C1: a substitution's strings are one line of plain text, so none can carry markup into the feed
 INJECTIONS = ["[Penjelly](https://evil.example/buy)", "Penjelly\n\n![x](https://evil.example/p.png)",
-              "```<script>alert(1)</script>```", "## Buy at evil.example", "</p><h1>Hacked</h1>"]
+              "```<script>alert(1)</script>```", "Penjelly\n## Buy at evil.example",
+              "</p><h1>Hacked</h1>"]
 
 
 @pytest.mark.parametrize("field", ["original", "spoken", "why"])
@@ -579,7 +580,8 @@ def test_finish_refuses_a_substitution_that_is_not_one_line_of_plain_text(named,
 
 
 @pytest.mark.parametrize("text", ["Pen\tjelly", "Pen\rjelly", "Pen jelly", "Pen​jelly",
-                                  "Pen‮jelly", "a|b", "a\\b", "a!", "a{b}", "a_b", "...", "",
+                                  "Pen‮jelly", "a|b", "a\\b", "a{b}", "a_b", "a*", "a<b",
+                                  "a[1]", "a`", "...", "",
                                   "x" * 201])
 def test_a_substitution_string_needs_a_word_and_no_markup_or_control_characters(text):
     with pytest.raises(ToolError, match="substitution spoken must be one line of plain text"):
@@ -587,7 +589,8 @@ def test_a_substitution_string_needs_a_word_and_no_markup_or_control_characters(
 
 
 @pytest.mark.parametrize("text", ["the Fourteenth", "U.S.", "Pengelley's", "Ocasio-Cortez",
-                                  "$3.50", "5%", "No. 5, e.g.", "Saint-Saëns", '"quoted"'])
+                                  "$3.50", "5%", "No. 5, e.g.", "Saint-Saëns", '"quoted"',
+                                  "#5", "(5%)", "Yahoo!", "a & b + c @ d / e: f; g?"])
 def test_plain_substitution_strings_pass(text):
     issues, subs = agent_tools.validate_finish("clean", [], [{"original": "x", "spoken": text}])
     assert subs == [{"original": "x", "spoken": text, "why": ""}]
@@ -599,7 +602,7 @@ def test_an_old_record_with_markup_in_a_substitution_is_never_published(text):
               "substitutions": [{"original": "Pengelley", "spoken": text, "why": ""},
                                 {"original": "XIV", "spoken": "the Fourteenth", "why": "numeral"}]}
     notes = notes_for(META, finish)
-    assert "evil" not in notes and "<" not in notes and "#" not in notes and "Penjelly" not in notes
+    assert "evil" not in notes and "<" not in notes and "Penjelly" not in notes
     assert '- "XIV" read as "the Fourteenth"' in notes  # the valid one is still listed
     out = evaluate(_state(finish=finish), ARTICLE, ARTICLE, META, G2P)
     assert out.action == "hold" and "evil" not in out.notes and "<" not in out.notes

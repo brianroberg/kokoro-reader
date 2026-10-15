@@ -47,8 +47,11 @@ OUTCOMES = ("clean", "minor", "hold")
 # Matched with fullmatch: `$` alone would also accept a trailing newline.
 VOICE_RE = re.compile(r"^[a-z]{2}_[a-z]{2,20}$")
 MAX_FIELD = 200
-# Characters a substitution's text may not have: markdown, HTML and link syntax.
-NOT_PLAIN = frozenset("<>[](){}#*_`|\\!")
+# Characters a substitution's text may not have: HTML tags, link and image brackets,
+# emphasis, code and table marks. Ordinary punctuation ("#5", "(5%)", "Yahoo!") is
+# fine: with no line break and no "[", none of it can open a link, an image, a
+# heading or a tag.
+NOT_PLAIN = frozenset("<>[]{}*_`|\\")
 # What a session writes that reaches the published episode notes (gate.notes_for):
 # each issue's kind, from this list, and its timestamp, matched by WHERE_RE (its free
 # note is for Brian, in result.json, never published); and each substitution's
