@@ -39,7 +39,8 @@ import re
 import unicodedata
 
 from narration.words import (MAX_SUBSTITUTIONS, Substitution, audit, declaration_problems,
-                             is_respelling, max_prepared_length, overrides, words)
+                             is_respelling, looks_like_link, max_prepared_length, overrides,
+                             words)
 
 MAX_RECORDS = 4
 MAX_CHECKS = 8
@@ -213,11 +214,10 @@ def _unproven(shown: str, phonemes: str, found: dict) -> str:
                 f"{respellings[0]!r}, a respelling of {shown!r}: declare the respelling in "
                 f"substitutions (original {shown!r}, spoken {respellings[0]!r}) so the notes "
                 f"list it, or call phonemes({shown!r}) and use its result")
-    # No IPA in it (or a slash): most likely a relative link the article itself has,
-    # which clean_markdown_text keeps as an override.
-    link = ("/" in phonemes or phonemes.isascii())
-    hint = (f"if it is a link from the article, unwrap it: replace {override} with {shown}; "
-            "otherwise " if link else "")
+    # No IPA in it (or a slash): most likely a link to a path, which clean_markdown_text
+    # keeps as an override. RunnerTools.open unwraps the article's own links.
+    hint = (f"if it is a link, not an override, unwrap it: replace {override} with {shown}; "
+            "otherwise " if looks_like_link(phonemes) else "")
     return (f"override {override} was not produced by the phonemes tool for {shown!r}; "
             f"{hint}call phonemes({shown!r}) and use its result")
 

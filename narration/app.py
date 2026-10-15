@@ -192,6 +192,8 @@ def build_app(store, agent_tools, runner_tools, runner_token, allowed_hosts: lis
     @runner.tool(name="open")
     def open_item(article_text: str, metadata: dict[str, Any]) -> dict:
         """Create a work item from the article's markdown and its metadata (JSON).
+        The text is kept with every link unwrapped to its text and its images dropped,
+        as the engine would read them (a link to a path is never a phonetic override).
         Returns item_id and agent_token, the bearer token for the agent session's
         /agent/mcp; it stops working at finish or finalize."""
         return run(runner_tools.open, article_text, metadata)

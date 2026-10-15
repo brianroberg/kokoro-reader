@@ -359,10 +359,23 @@ def test_an_override_already_in_the_article_still_needs_a_lookup(tmp_path):
     _record_and_check(tools, item)
     with pytest.raises(ToolError, match=re.escape(
             "override [Home](/home/) was not produced by the phonemes tool for 'Home'; if it is "
-            "a link from the article, unwrap it: replace [Home](/home/) with Home; otherwise "
+            "a link, not an override, unwrap it: replace [Home](/home/) with Home; otherwise "
             "call phonemes('Home') and use its result")):
         tools.finish(item, "clean", [], [])
     tools.replace_text(item, "[Home](/home/)", "Home")
+    _record_and_check(tools, item)
+    assert tools.finish(item, "clean", [], [])["ok"]
+
+
+def test_a_multi_word_link_in_the_prepared_text_gets_the_unwrap_hint_too(tmp_path):
+    store = WorkItemStore(tmp_path)
+    tools = AgentTools(store, FakeTTS(), FakeVerifier(), FakeG2P())
+    item, _ = store.open("As [the report](/publications/x/) said.", {})  # not through open()
+    _record_and_check(tools, item)
+    with pytest.raises(ToolError, match=re.escape(
+            "unwrap it: replace [the report](/publications/x/) with the report")):
+        tools.finish(item, "clean", [], [])
+    tools.replace_text(item, "[the report](/publications/x/)", "the report")
     _record_and_check(tools, item)
     assert tools.finish(item, "clean", [], [])["ok"]
 

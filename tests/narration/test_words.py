@@ -1256,3 +1256,63 @@ def test_property_apply_says_what_the_prepared_text_says(data, paras):
     assert applied is not None
     assert words(applied) == words(prepared)
     assert overrides(applied) == overrides(prepared)
+
+
+# I3 (final review): the article as a work item keeps it, links unwrapped
+@pytest.mark.parametrize("article, stored", [
+    ("As [the report](/publications/x/) said.", "As the report said."),
+    ("See [Home](/home/) today.", "See Home today."),
+    ("See [the court](https://example.com/a_(b)) today.", "See the court) today."),  # as cleaning reads it
+    ("A ![chart](/img/a/) here.", "A  here."),
+    ("A linked [![chart](a.png)](/x/) image.", "A linked  image."),  # an empty link is dropped
+    ("A [[nested](/a/)](/b/) link.", "A nested link."),
+    ("Not links: [x] (y), [](), [x]() and a [lone bracket.",
+     "Not links: [x] (y), [](), [x]() and a [lone bracket."),
+])
+def test_unlinked_unwraps_every_link_and_drops_images(article, stored):
+    from narration.words import overrides, unlinked
+    assert unlinked(article) == stored
+    assert overrides(unlinked(article)) == []
+
+
+_LINK_WORDS = st.sampled_from(["the", "report", "Home", "Leo", "court", "x"])
+_TARGETS = st.sampled_from(["/a/", "/publications/the-report/", "https://example.com/a",
+                            "/x", "page.html", "/ɛks/"])
+
+
+@st.composite
+def linked_markdown(draw):
+    pieces = []
+    for _ in range(draw(st.integers(1, 8))):
+        kind = draw(st.integers(0, 3))
+        text = " ".join(draw(st.lists(_LINK_WORDS, min_size=1, max_size=3)))
+        if kind == 0:
+            pieces.append(text)
+        elif kind == 1:
+            pieces.append(f"[{text}]({draw(_TARGETS)})")
+        elif kind == 2:
+            pieces.append(f"![{text}]({draw(_TARGETS)})")
+        else:
+            pieces.append(f"[{text}]({draw(_TARGETS)}){draw(st.sampled_from(['', ',', '.']))}")
+    return " ".join(pieces) + "."
+
+
+@settings(max_examples=200)
+@given(linked_markdown())
+def test_property_unlinked_keeps_the_words_and_leaves_no_override(article):
+    from narration.words import overrides, unlinked
+    stored = unlinked(article)
+    assert overrides(stored) == []
+    assert words(stored) == words(article)  # a link's text was always what was read
+
+
+def test_a_link_refused_as_an_override_says_to_unwrap_it():
+    article = "As the report said, see Home."
+    problems = check(article, "As [the report](/publications/x/) said, see Home.", [])
+    assert len(problems) == 1 and "exactly one word" in problems[0]
+    assert problems[0].endswith("if it is a link, not an override, unwrap it: replace "
+                                "[the report](/publications/x/) with the report")
+    glued = check(article, "As the report said, see x[Home](/home/).", [])
+    assert any("glued" in p and "replace [Home](/home/) with Home" in p for p in glued)
+    ipa = check("We saw the cat.", "We saw [the cat](/ðəkæt/).", [])  # IPA: an override
+    assert len(ipa) == 1 and "unwrap" not in ipa[0]

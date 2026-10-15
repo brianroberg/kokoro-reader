@@ -7,6 +7,7 @@ import os
 
 from narration.agent_tools import ToolError, _checks_used, _sha256
 from narration.gate import _meta, album_for, evaluate
+from narration.words import unlinked
 
 
 class RunnerTools:
@@ -15,6 +16,9 @@ class RunnerTools:
         self.store, self.converter, self.g2p = store, converter, g2p
 
     def open(self, article_text: str, metadata: dict) -> dict:
+        """A work item for the article. Its text is kept with every link unwrapped to
+        its text and its images dropped (words.unlinked): an article's link to a path
+        between slashes would otherwise read as a phonetic override no lookup made."""
         if not isinstance(article_text, str) or not article_text.strip():
             raise ToolError("article_text must be a non-empty string")
         if not isinstance(metadata, dict):
@@ -23,6 +27,9 @@ class RunnerTools:
             json.dumps(metadata, allow_nan=False)
         except (TypeError, ValueError) as e:
             raise ToolError(f"metadata must be JSON: {e}") from e
+        article_text = unlinked(article_text)
+        if not article_text.strip():
+            raise ToolError("article_text has no text once its images are dropped")
         item_id, token = self.store.open(article_text, metadata)
         return {"item_id": item_id, "agent_token": token}
 

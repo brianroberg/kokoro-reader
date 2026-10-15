@@ -759,3 +759,39 @@ def test_a_case_only_edit_the_engine_reads_differently_is_refused_with_override_
             "override from phonemes() instead of changing case or spelling.") in message
     assert "declare " not in message and "in substitutions" not in message  # no impossible advice
     assert message.endswith("Then record and check again; or finish with outcome 'hold'.")
+
+
+# I3 (final review): markdownify keeps a page's hrefs, so an article's own links to
+# paths between slashes read as phonetic overrides; open unwraps every link
+LINKED = ("# The Report\n\nAs [the report](/publications/the-report/) said, prices fell. "
+          "See [Home](/home/) and [the court](https://example.com/court?x=1).\n\n"
+          "![A chart of prices](/images/chart/)\n\nIt went well.")
+
+
+def test_open_unwraps_the_articles_links_and_the_item_publishes_unedited(tmp_path):
+    from narration.words import overrides
+    from text_to_speech import clean_markdown_text
+    store = WorkItemStore(tmp_path)
+    conv = FakeConverter()
+    runner = RunnerTools(store, conv, FakeG2P())
+    tools = AgentTools(store, FakeTTS(), FakeVerifier(), FakeG2P())
+    item = runner.open(LINKED, META)["item_id"]
+    stored = ("# The Report\n\nAs the report said, prices fell. See Home and the court.\n\n"
+              "\n\nIt went well.")  # the image is dropped, alt text and all, as the engine drops it
+    assert store.read_text(item, "source.md") == store.read_text(item, "prepared.md") == stored
+    assert overrides(stored) == []
+    # What the engine reads is unchanged, but for the paths it no longer takes for overrides.
+    as_links = LINKED.replace("/publications/the-report/", "x").replace("/home/", "x")
+    assert clean_markdown_text(stored) == clean_markdown_text(as_links)
+    tools.record(item); tools.check(item)
+    assert tools.finish(item, "clean", [], [])["ok"]
+    out = runner.finalize(item)
+    assert out["action"] == "publish" and out["mp3"], out["reasons"]
+
+
+def test_open_refuses_an_article_with_no_text_once_its_images_are_dropped(tmp_path):
+    store = WorkItemStore(tmp_path)
+    runner = RunnerTools(store, FakeConverter(), FakeG2P())
+    with pytest.raises(ToolError, match="no text"):
+        runner.open("![A chart](/images/chart.png)\n", META)
+    assert list((tmp_path / "items").iterdir()) == []

@@ -116,7 +116,7 @@ import re
 from dataclasses import dataclass
 from typing import NamedTuple
 
-from text_to_speech import clean_markdown_text, prepare_for_tts, split_sections
+from text_to_speech import _remove_images, clean_markdown_text, prepare_for_tts, split_sections
 
 MAX_SUBSTITUTIONS = 25
 MAX_SPOKEN_WORDS = 6         # per declaration
@@ -215,6 +215,51 @@ def engine_text(text: str) -> str:
     generate_audio's preparation, then one line per [BREAK] section (split_sections),
     since the engine reads each section on its own, as it reads each line."""
     return "\n".join(split_sections(_engine_input(text)))
+
+
+_UNLINK_PASSES = 8  # a link nested in another's text needs a pass per level
+
+
+def unlinked(text: str) -> str:
+    """The article as a work item keeps it (RunnerTools.open): its images dropped and
+    every link unwrapped to its text, as clean_markdown_text drops and unwraps them,
+    but a link to a path between slashes too, which clean_markdown_text keeps as the
+    engine's override syntax. markdownify keeps a page's hrefs, so an article's
+    "[the report](/publications/x/)" is a site link, never an override: the article
+    carries none, and its words are its link texts, as they always were. A link with
+    no text is dropped. A link nested in another's text is unwrapped a pass later;
+    each pass is linear, and there are at most _UNLINK_PASSES."""
+    text = _remove_images(text)
+    for _ in range(_UNLINK_PASSES):
+        out, pos, search, close = [], 0, 0, -1
+        while True:  # text_to_speech._unwrap_links, without its exception for overrides
+            start = text.find("[", search)
+            if start < 0:
+                break
+            bracket = text.find("]", start + 1)
+            if bracket < 0:
+                break
+            if text.startswith("(", bracket + 1):
+                if close < bracket + 2:
+                    close = text.find(")", bracket + 2)
+                    if close < 0:
+                        break
+                if close > bracket + 2:
+                    out += [text[pos:start], text[start + 1:bracket]]
+                    pos = search = close + 1
+                    continue
+            search = bracket + 1
+        if not out:
+            break
+        out.append(text[pos:])
+        text = "".join(out)
+    return text
+
+
+def looks_like_link(phonemes: str) -> bool:
+    """Whether an override's phonemes look like a link's target rather than IPA: no
+    IPA in them, or a slash (a path of several parts)."""
+    return "/" in phonemes or phonemes.isascii()
 
 
 def _straight(text: str) -> str:
@@ -566,6 +611,9 @@ def _check_overrides(spoken: str, breaks: list[int] = ()) -> list[str]:
                 why.append(f"the phonemes are {len(phonemes)} characters; "
                            f"at most {cap} for this displayed text")
         if why:
+            if phonemes and looks_like_link(phonemes):
+                why.append(f"if it is a link, not an override, unwrap it: replace {m.group(0)} "
+                           f"with {shown}")
             problems.append(f"phonetic override {m.group(0)!r} is not allowed: {'; '.join(why)}")
     return problems
 
