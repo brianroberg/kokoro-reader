@@ -9,9 +9,12 @@ read-modify-write of the item's state.json happens inside that lock.
 An override's phonemes must come from the phonemes tool. words.check reads a
 [word](/phonemes/) override as its displayed word and can't know what the
 phonemes say, so a session could voice anything under the override's length cap.
-So phonemes() records every lookup in the item's state, and finish accepts an
-override only if its phonemes are what a lookup returned for its displayed word
-or a respelling of it (words.is_respelling, the rule substitutions use).
+So phonemes() takes one plain word (never link syntax, which misaki's
+preprocessing would read as an override and echo back) and records every lookup
+in the item's state, and finish accepts an override only if its phonemes are
+what a lookup returned for its displayed word, or for a respelling of it
+(words.is_respelling) that the call declares as a substitution, so the published
+notes list it. Every declared substitution must be used, and declared once.
 
 The claims finish accepts are about the text that was recorded: record keeps the
 sha256 of the exact text it handed the engine (state["recorded_sha256"], which
@@ -25,9 +28,10 @@ import hashlib
 import json
 import os
 import re
+import unicodedata
 
-from narration.words import (MAX_SUBSTITUTIONS, Substitution, check as words_check,
-                             is_respelling, max_prepared_length, overrides)
+from narration.words import (MAX_SUBSTITUTIONS, Substitution, audit, is_respelling,
+                             max_prepared_length, overrides, words)
 
 MAX_RECORDS = 4
 MAX_CHECKS = 8
@@ -45,6 +49,7 @@ MAX_ISSUES = 20
 MAX_NOTE = 80
 MAX_EDIT_TEXT = 20_000  # characters in replace_text's old, and in its new
 MAX_WORD = 64           # characters in a word given to phonemes()
+WORD_MARKS = "'’-."     # what a word given to phonemes() may have besides letters and marks
 MAX_LOOKUPS = 200       # phonemes() lookups an item keeps, the latest
 MAX_SHOWN = 5           # unproven overrides one refusal names
 
@@ -76,6 +81,19 @@ def _substitution(s):
     return {"original": _short(s.get("original"), "original"),
             "spoken": _short(s.get("spoken"), "spoken"),
             "why": _short(s.get("why", ""), "why")}
+
+
+def _lookup_word(word) -> str:
+    """A word for phonemes(): letters (with combining marks), apostrophes, hyphens and
+    periods, at least one letter. No whitespace, digits, brackets or slashes: misaki's
+    preprocessing reads "[word](/phonemes/)" as an override and returns its phonemes."""
+    if (not isinstance(word, str) or not 0 < len(word) <= MAX_WORD
+            or not all(ch.isalpha() or ch in WORD_MARKS or unicodedata.category(ch).startswith("M")
+                       for ch in word)
+            or not any(ch.isalpha() for ch in word)):
+        raise ToolError(f"word must be a single word of 1-{MAX_WORD} characters: letters, with "
+                        "apostrophes, hyphens or periods (no spaces, digits, brackets or slashes)")
+    return word
 
 
 def _speed(speed) -> float:
@@ -119,23 +137,57 @@ def _matches(text: str, old: str) -> int:
     return max(2, text.count(old))
 
 
-def _unproven_overrides(state: dict, prepared: str, limit: int) -> list[str]:
-    """A message for each override in `prepared` whose phonemes no recorded lookup
-    returned for its displayed word or a respelling of it, stopping at `limit`: each
-    override is compared with every lookup that returned its phonemes (up to
-    MAX_LOOKUPS), so scanning thousands of unproven ones would take seconds."""
-    looked_up: dict[str, set[str]] = {}
+def _unproven_overrides(state: dict, prepared: str, declared: list[tuple], limit: int):
+    """Check each override in `prepared` against the recorded lookups. Returns
+    messages for the ones not proven (stopping at `limit`), and the indices of the
+    `declared` substitutions (as words() pairs) that declare an override's respelling.
+
+    Proven: a lookup of the displayed word itself returned these phonemes, or a
+    lookup of a respelling of it did and that respelling is declared. Each lookup
+    word and each case-folded display goes through words() once, so a proven
+    override costs a dictionary lookup; respellings are compared only against the
+    (at most MAX_SUBSTITUTIONS) declarations, or, for a refusal's message, against
+    the lookups of an unproven override."""
+    looked_up: dict[str, dict[tuple, str]] = {}  # phonemes -> words() of a lookup -> its word
     for lookup in state.get("phoneme_lookups", []):
-        looked_up.setdefault(lookup["phonemes"], set()).add(lookup["word"])
-    problems = []
-    for shown, phonemes in dict.fromkeys(overrides(prepared)):
-        if not any(is_respelling(shown, word) for word in looked_up.get(phonemes, ())):
-            problems.append(f"override [{shown}](/{phonemes}/) was not produced by the phonemes "
-                            f"tool for a respelling of {shown!r}; call phonemes({shown!r}) "
-                            "and use its result")
-            if len(problems) >= limit:
-                break
-    return problems
+        looked_up.setdefault(lookup["phonemes"], {}).setdefault(
+            tuple(words(lookup["word"])), lookup["word"])
+    problems, used, seen = [], set(), set()
+    for shown, phonemes in overrides(prepared):
+        if (shown.casefold(), phonemes) in seen:
+            continue
+        seen.add((shown.casefold(), phonemes))
+        found, display = looked_up.get(phonemes, {}), tuple(words(shown))
+        if display and display in found:
+            continue
+        respelled = [k for k, (original, spoken) in enumerate(declared)
+                     if original == display and spoken in found
+                     and is_respelling(shown, found[spoken])]
+        if respelled:
+            used.update(respelled)
+            continue
+        problems.append(_unproven(shown, phonemes, found))
+        if len(problems) >= limit:
+            break
+    return problems, used
+
+
+def _unproven(shown: str, phonemes: str, found: dict) -> str:
+    """Why an override isn't proven, and what to do about it."""
+    override = f"[{shown}](/{phonemes}/)"
+    respellings = sorted(word for word in found.values() if is_respelling(shown, word))
+    if respellings:
+        return (f"override {override} uses the phonemes the phonemes tool gave for "
+                f"{respellings[0]!r}, a respelling of {shown!r}: declare the respelling in "
+                f"substitutions (original {shown!r}, spoken {respellings[0]!r}) so the notes "
+                f"list it, or call phonemes({shown!r}) and use its result")
+    # No IPA in it (or a slash): most likely a relative link the article itself has,
+    # which clean_markdown_text keeps as an override.
+    link = ("/" in phonemes or phonemes.isascii())
+    hint = (f"if it is a link from the article, unwrap it: replace {override} with {shown}; "
+            "otherwise " if link else "")
+    return (f"override {override} was not produced by the phonemes tool for {shown!r}; "
+            f"{hint}call phonemes({shown!r}) and use its result")
 
 
 def _locked(method):
@@ -269,9 +321,7 @@ class AgentTools:
     @_locked
     def phonemes(self, item_id, word):
         state = self._open_state(item_id)
-        if not isinstance(word, str) or not 0 < len(word) <= MAX_WORD:
-            raise ToolError(f"word must be 1-{MAX_WORD} characters")
-        out = str(self.g2p.phonemes(word))
+        out = str(self.g2p.phonemes(_lookup_word(word)))
         # finish accepts an override only with phonemes recorded here (module docstring).
         lookups = state.get("phoneme_lookups", []) + [{"word": word, "phonemes": out}]
         state["phoneme_lookups"] = lookups[-MAX_LOOKUPS:]
@@ -334,12 +384,23 @@ class AgentTools:
                       if n < MAX_RECORDS and _checks_used(state) < MAX_CHECKS
                       else "No record round or check is left to fix it: finish with outcome 'hold'.")
             raise ToolError(f"the latest check's pre-check flagged: {flagged}. {advice}")
-        problems = words_check(self.store.read_text(item_id, "source.md"), prepared,
-                               [Substitution(s["original"], s["spoken"]) for s in subs_in])
+        declared = [(tuple(words(s["original"])), tuple(words(s["spoken"]))) for s in subs_in]
+        twice = [s for k, s in enumerate(subs_in) if declared[k] in declared[:k]]
+        if twice:
+            raise ToolError("; ".join(f"substitution {s['original']!r} -> {s['spoken']!r} is "
+                                      "declared twice" for s in twice) + ". Declare each once.")
+        subs = [Substitution(s["original"], s["spoken"]) for s in subs_in]
+        problems, applied = audit(self.store.read_text(item_id, "source.md"), prepared, subs)
         if problems:
             raise ToolError("the prepared text differs from the article: " + "; ".join(problems)
                             + ". Declare each word change in substitutions, or undo it.")
-        unproven = _unproven_overrides(state, prepared, MAX_SHOWN + 1)
+        unproven, respellings = _unproven_overrides(state, prepared, declared, MAX_SHOWN + 1)
         if unproven:
             raise ToolError("; ".join(unproven[:MAX_SHOWN])
                             + ("; and more overrides like these" if len(unproven) > MAX_SHOWN else ""))
+        unused = [s for k, (s, sub) in enumerate(zip(subs_in, subs))
+                  if not applied.get(sub) and k not in respellings]
+        if unused:
+            raise ToolError("; ".join(f"substitution {s['original']!r} -> {s['spoken']!r} is "
+                                      "declared but the prepared text does not use it"
+                                      for s in unused) + ". Remove it from substitutions.")

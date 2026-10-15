@@ -7,7 +7,7 @@ from hypothesis import given, settings, strategies as st
 
 from narration import agent_tools
 from narration.agent_tools import MAX_RECORDS, AgentTools, ToolError
-from narration.fakes import FakeG2P, FakeTTS, FakeVerifier
+from narration.fakes import FakeG2P, FakeLinkG2P, FakeTTS, FakeVerifier
 from narration.workitems import WorkItemStore
 
 ARTICLE = "Pope Leo XIV met the family.\n\nIt went well."
@@ -280,12 +280,19 @@ def test_an_override_from_a_lookup_of_its_own_word_passes(named):
     assert tools.finish(item, "clean", [], [])["ok"]
 
 
-def test_an_override_from_a_lookup_of_a_respelling_passes(named):
+def test_an_override_from_a_respelled_lookup_needs_the_respelling_declared(named):
     store, tools, item = named
-    ph = tools.phonemes(item, "Pengelly")["phonemes"]  # respelled to steer the engine
+    ph = tools.phonemes(item, "Penjelly")["phonemes"]  # respelled to steer the engine
     tools.replace_text(item, "Pengelley", f"[Pengelley](/{ph}/)")
     _record_and_check(tools, item)
-    assert tools.finish(item, "clean", [], [])["ok"]
+    with pytest.raises(ToolError, match=re.escape(
+            f"override [Pengelley](/{ph}/) uses the phonemes the phonemes tool gave for "
+            "'Penjelly', a respelling of 'Pengelley': declare the respelling in substitutions "
+            "(original 'Pengelley', spoken 'Penjelly')")):
+        tools.finish(item, "clean", [], [])
+    respelling = {"original": "Pengelley", "spoken": "Penjelly", "why": "pronunciation"}
+    assert tools.finish(item, "clean", [], [respelling])["ok"]
+    assert store.load_state(item)["finish"]["substitutions"] == [respelling]  # published
 
 
 def test_hand_written_phonemes_are_refused(named):
@@ -293,8 +300,8 @@ def test_hand_written_phonemes_are_refused(named):
     tools.phonemes(item, "Pengelley")  # looked up, but the override doesn't use the result
     tools.replace_text(item, "Pengelley", "[Pengelley](/pɛnʤˈɛli/)")
     _record_and_check(tools, item)
-    message = ("override [Pengelley](/pɛnʤˈɛli/) was not produced by the phonemes tool for a "
-               "respelling of 'Pengelley'; call phonemes('Pengelley') and use its result")
+    message = ("override [Pengelley](/pɛnʤˈɛli/) was not produced by the phonemes tool for "
+               "'Pengelley'; call phonemes('Pengelley') and use its result")
     with pytest.raises(ToolError, match=re.escape(message)):
         tools.finish(item, "clean", [], [])
     assert store.load_state(item)["status"] == "open"
@@ -328,8 +335,14 @@ def test_an_override_already_in_the_article_still_needs_a_lookup(tmp_path):
     tools = AgentTools(store, FakeTTS(), FakeVerifier(), FakeG2P())
     item, _ = store.open("See [Home](/home/) today.", {})  # a relative link reads as an override
     _record_and_check(tools, item)
-    with pytest.raises(ToolError, match=re.escape("call phonemes('Home')")):
+    with pytest.raises(ToolError, match=re.escape(
+            "override [Home](/home/) was not produced by the phonemes tool for 'Home'; if it is "
+            "a link from the article, unwrap it: replace [Home](/home/) with Home; otherwise "
+            "call phonemes('Home') and use its result")):
         tools.finish(item, "clean", [], [])
+    tools.replace_text(item, "[Home](/home/)", "Home")
+    _record_and_check(tools, item)
+    assert tools.finish(item, "clean", [], [])["ok"]
 
 
 def test_lookups_are_kept_in_state_across_tool_calls(named):
@@ -345,11 +358,12 @@ def test_lookups_are_kept_in_state_across_tool_calls(named):
 
 def test_only_the_last_200_lookups_are_kept(named):
     store, tools, item = named
+    spelled = str.maketrans("0123456789", "abcdefghij")  # phonemes() takes letters only
     for k in range(205):
-        tools.phonemes(item, f"word{k}")
+        tools.phonemes(item, "word" + str(k).translate(spelled))
     lookups = store.load_state(item)["phoneme_lookups"]
     assert len(lookups) == 200
-    assert (lookups[0]["word"], lookups[-1]["word"]) == ("word5", "word204")
+    assert (lookups[0]["word"], lookups[-1]["word"]) == ("wordf", "wordcae")  # 5 and 204
 
 
 # ---- R2: size caps ----
@@ -379,17 +393,25 @@ def test_replace_text_refuses_old_or_new_over_20000_characters(tmp_path):
     tools.replace_text(item, "end.", "y" * 20_000)  # at the cap
 
 
+def _counting_audit(calls):
+    def audit(source, prepared, subs):
+        calls.append(subs)
+        return [], {s: 1 for s in subs}
+    return audit
+
+
 def test_finish_refuses_too_many_substitutions_before_the_word_check(env, monkeypatch):
     _, tools, _, _, item, _ = env
     _record_and_check(tools, item)
     calls = []
-    monkeypatch.setattr(agent_tools, "words_check", lambda *a: calls.append(a) or [])
+    monkeypatch.setattr(agent_tools, "audit", _counting_audit(calls))
     sub = {"original": "XIV", "spoken": "the Fourteenth", "why": "numeral"}
     for n in (agent_tools.MAX_SUBSTITUTIONS + 1, 10_000):
         with pytest.raises(ToolError, match="at most 25 substitutions"):
             tools.finish(item, "clean", [], [sub] * n)
     assert calls == []
-    assert tools.finish(item, "clean", [], [sub] * agent_tools.MAX_SUBSTITUTIONS)["ok"]
+    distinct = [{"original": f"w{k}", "spoken": f"v{k}"} for k in range(agent_tools.MAX_SUBSTITUTIONS)]
+    assert tools.finish(item, "clean", [], distinct)["ok"]
     assert len(calls) == 1  # the limit itself reaches the check
 
 
@@ -397,7 +419,7 @@ def test_finish_refuses_too_many_issues_before_the_word_check(env, monkeypatch):
     _, tools, _, _, item, _ = env
     _record_and_check(tools, item)
     calls = []
-    monkeypatch.setattr(agent_tools, "words_check", lambda *a: calls.append(a) or [])
+    monkeypatch.setattr(agent_tools, "audit", _counting_audit(calls))
     ok = {"kind": "pacing", "where": "1:05", "note": ""}
     for n in (agent_tools.MAX_ISSUES + 1, 10_000):
         with pytest.raises(ToolError, match="at most 20"):
@@ -695,3 +717,132 @@ def test_the_precheck_refusal_reads_cleanly(env):
         tools.finish(item, "minor", [ISSUE], [])
     assert "pause.." not in str(refused.value)
     assert "far longer than a [BREAK] pause. Fix and re-record" in str(refused.value)
+
+
+
+# C2: phonemes() takes one word, never link syntax that misaki's preprocessing reads
+@pytest.fixture
+def linked(tmp_path):
+    store = WorkItemStore(tmp_path)
+    tools = AgentTools(store, FakeTTS(), FakeVerifier(), FakeLinkG2P())
+    item, _ = store.open(NAMED, {})
+    return store, tools, item
+
+
+@pytest.mark.parametrize("word", [
+    "[Pengelley](/kˈɪlðəmˈɔl/)", "Pen gelley", "Pengelley\n", "Pen\tgelley", "x/y", "(x)",
+    "[x]", "1990s", "", "...", "'-.", "a" * 65, 7, None])
+def test_phonemes_refuses_anything_but_one_word(linked, word):
+    store, tools, item = linked
+    with pytest.raises(ToolError, match="a single word"):
+        tools.phonemes(item, word)
+    assert "phoneme_lookups" not in store.load_state(item)
+
+
+@pytest.mark.parametrize("word", ["Pengelley", "Pengelley's", "Pengelley’s", "Ocasio-Cortez",
+                                  "U.S.", "nai\u0308ve", "Penjelly", "a" * 64])
+def test_phonemes_accepts_a_word_with_apostrophes_hyphens_periods_and_marks(linked, word):
+    store, tools, item = linked
+    assert tools.phonemes(item, word) == {"word": word, "phonemes": FAKE}
+
+
+def test_an_override_cannot_launder_its_own_phonemes_through_the_lookup(linked):
+    store, tools, item = linked
+    with pytest.raises(ToolError):
+        tools.phonemes(item, "[Pengelley](/kˈɪlðəmˈɔl/)")  # FakeLinkG2P would echo them back
+    tools.replace_text(item, "Pengelley", "[Pengelley](/kˈɪlðəmˈɔl/)")
+    _record_and_check(tools, item)
+    with pytest.raises(ToolError, match="not produced by the phonemes tool"):
+        tools.finish(item, "clean", [], [])
+
+
+# I1: a respelled lookup changes the reading only when declared, and is published
+class SpellingG2P:
+    """Phonemes that differ per word, so a test can tell lookups apart."""
+    def phonemes(self, word):
+        return "ˈ" + word.lower()
+
+
+@pytest.fixture
+def spelled(tmp_path):
+    store = WorkItemStore(tmp_path)
+    tools = AgentTools(store, FakeTTS(), FakeVerifier(), SpellingG2P())
+    item, _ = store.open("The plan was rejected today.", {})
+    return store, tools, item
+
+
+def test_a_respelling_that_changes_the_meaning_must_be_declared(spelled):
+    store, tools, item = spelled
+    ph = tools.phonemes(item, "respected")["phonemes"]
+    tools.replace_text(item, "rejected", f"[rejected](/{ph}/)")
+    _record_and_check(tools, item)
+    with pytest.raises(ToolError, match="declare the respelling in substitutions "
+                                        r"\(original 'rejected', spoken 'respected'\)"):
+        tools.finish(item, "clean", [], [])
+    sub = {"original": "rejected", "spoken": "respected", "why": "pronunciation"}
+    assert tools.finish(item, "clean", [], [sub])["ok"]  # allowed, but now in the notes
+    assert store.load_state(item)["finish"]["substitutions"] == [sub]
+
+
+def test_a_declared_respelling_must_match_the_lookup_it_names(spelled):
+    store, tools, item = spelled
+    ph = tools.phonemes(item, "respected")["phonemes"]
+    tools.phonemes(item, "rejected")
+    tools.replace_text(item, "rejected", f"[rejected](/{ph}/)")
+    _record_and_check(tools, item)
+    other = {"original": "rejected", "spoken": "reflected", "why": "pronunciation"}
+    with pytest.raises(ToolError, match="respelling of 'rejected'"):
+        tools.finish(item, "clean", [], [other])
+
+
+def test_a_lookup_of_the_displayed_word_needs_no_declaration(spelled):
+    store, tools, item = spelled
+    ph = tools.phonemes(item, "REJECTED")["phonemes"]  # case is folded
+    assert ph == "ˈrejected"
+    tools.replace_text(item, "rejected", f"[rejected](/{ph}/)")
+    _record_and_check(tools, item)
+    assert tools.finish(item, "clean", [], [])["ok"]
+
+
+# I2: every declared substitution is used, and declared once
+def test_a_declared_substitution_the_text_does_not_use_is_refused(env):
+    store, tools, _, _, item, _ = env
+    _record_and_check(tools, item)
+    unused = {"original": "Pope Leo XIV", "spoken": "buy pills now", "why": "x"}
+    with pytest.raises(ToolError, match=re.escape(
+            "substitution 'Pope Leo XIV' -> 'buy pills now' is declared but the prepared text "
+            "does not use it")):
+        tools.finish(item, "clean", [], [unused])
+    assert store.load_state(item)["status"] == "open"
+
+
+def test_a_substitution_declared_twice_is_refused(env):
+    store, tools, _, _, item, _ = env
+    tools.replace_text(item, "XIV", "the Fourteenth")
+    _record_and_check(tools, item)
+    sub = {"original": "XIV", "spoken": "the Fourteenth", "why": "numeral"}
+    for twice in ([sub, sub], [sub, {**sub, "spoken": "The Fourteenth", "why": "again"}]):
+        with pytest.raises(ToolError, match="declared twice"):
+            tools.finish(item, "clean", [], twice)
+    assert tools.finish(item, "clean", [], [sub])["ok"]
+
+
+# M1: proven overrides cost a dictionary lookup each, not a respelling scan
+def test_proven_overrides_need_no_respelling_comparisons(tmp_path, monkeypatch):
+    store = WorkItemStore(tmp_path)
+    tools = AgentTools(store, FakeTTS(), FakeVerifier(), FakeG2P())
+    names = [f"Name{chr(97 + k // 26)}{chr(97 + k % 26)}" for k in range(150)]
+    item, _ = store.open(" ".join(names) + ".", {})
+    for name in names:  # 150 lookups, all with the same phonemes (the worst case)
+        tools.phonemes(item, name)
+    prepared = " ".join(f"[{n}](/{FAKE}/) [{n.upper()}](/{FAKE}/)" for n in names) + "."
+    store.write_text(item, "source.md", " ".join(f"{n} {n}" for n in names) + ".")
+    store.write_text(item, "prepared.md", prepared)
+    _record_and_check(tools, item)
+    respellings, word_calls = [], []
+    real_words = agent_tools.words
+    monkeypatch.setattr(agent_tools, "is_respelling", lambda a, b: respellings.append((a, b)))
+    monkeypatch.setattr(agent_tools, "words", lambda t: word_calls.append(t) or real_words(t))
+    assert tools.finish(item, "clean", [], [])["ok"]
+    assert respellings == []
+    assert len(word_calls) <= 2 * len(names)  # once per lookup, once per case-folded display
