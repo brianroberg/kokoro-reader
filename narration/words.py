@@ -392,7 +392,7 @@ def audit(source: str, prepared: str,
 
 
 def apply(source: str, prepared: str, substitutions: list[Substitution]) -> str | None:
-    """The article as the engine reads it (engine_text's preparation), rewritten to say
+    """The article as the engine reads it, rewritten to say
     what the prepared text claims to say: each declared substitution applied where
     audit's alignment applied it, and each phonetic override of the prepared text put
     around the article's word it stands for, free-standing ("[word](/phonemes/)" with a
@@ -402,10 +402,13 @@ def apply(source: str, prepared: str, substitutions: list[Substitution]) -> str 
     then reports why), or an override doesn't stand for exactly one whole word
     (apply_with_reason says which).
 
-    gate.speech_matches compares what the engine says for this and for the prepared
-    text. The prepared text's pacing (commas, "--", [BREAK]s) doesn't travel, so a
-    sign or a mark that the word check counts as silent but misaki voices shows up as
-    a difference."""
+    The result is already prepared as engine_text prepares a text (markup cleaned,
+    spaces made plain, "--" made a pause, one section per line), ready for the G2P:
+    don't prepare it again, since cleaning is not idempotent ("***x***" cleaned twice
+    loses the asterisks the engine says). gate.speech_matches compares what the engine
+    says for this and for engine_text(prepared). The prepared text's pacing (commas,
+    "--", [BREAK]s) doesn't travel, so a sign or a mark that the word check counts as
+    silent but misaki voices shows up as a difference."""
     return apply_with_reason(source, prepared, substitutions)[0]
 
 

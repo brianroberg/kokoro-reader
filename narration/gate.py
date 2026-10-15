@@ -117,17 +117,19 @@ def _valid(validator, entries) -> list[dict]:
 def speech_matches(g2p, source: str, prepared: str, substitutions: list[Substitution]) -> list[str]:
     """Problems with what the engine would say for `prepared`, against what it would
     say for the article with the declared substitutions and the prepared text's
-    overrides (words.apply); [] when the two sound the same. Both texts are read as
-    the engine reads them (words.engine_text), through the engine's own G2P, and
-    compared as letters and stress and length marks only, so pacing punctuation,
-    pauses and paragraph breaks are free. One problem at most, for the first place
-    they differ."""
+    overrides (words.apply); [] when the two sound the same. Each text is prepared for
+    the engine exactly once, as the engine prepares it: the prepared text by
+    words.engine_text, the article's side by apply itself (its result is already in
+    that form, and cleaning is not idempotent: "***x***" cleaned twice loses the
+    asterisks the engine says). Both go through the engine's own G2P and are compared
+    as letters and stress and length marks only, so pacing punctuation, pauses and
+    paragraph breaks are free. One problem at most, for the first place they differ."""
     applied, why = apply_with_reason(source, prepared, substitutions)
     if applied is None:
         if check(source, prepared, substitutions):  # it says where; this only says so
             why += " (the word check says where)"
         return [f"{why}, so what the engine would say could not be compared with the article"]
-    article_text = engine_text(applied)
+    article_text = applied  # already as the engine reads it: not prepared a second time
     said, heard = g2p.phonemes_for_text(engine_text(prepared)), g2p.phonemes_for_text(article_text)
     (a, a_at), (b, b_at) = _sounds(said), _sounds(heard)
     if a == b:

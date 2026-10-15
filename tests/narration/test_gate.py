@@ -536,6 +536,9 @@ def test_misaki_hears_a_sign_the_word_check_misses():
     prepared = "He said([Lawler](/lˈɔlɚ/)) that [Pengelley](/pɛnʤˈɛli/) left."
     assert check(article, prepared, []) == []
     assert speech_matches(g2p, article, prepared, [])
+    # markup that a second cleaning would change, unedited, matches
+    for article in ("It was ***truly*** fine.", "# # Hash tags", "1. 2. Two items"):
+        assert speech_matches(g2p, article, article, []) == []
 
 
 # ---- fix round 1 ----
@@ -649,3 +652,42 @@ def test_open_refuses_metadata_that_is_not_json_before_touching_the_store(tmp_pa
     with pytest.raises(ToolError, match="metadata must be JSON"):
         runner.open(ARTICLE, metadata)
     assert list((tmp_path / "items").iterdir()) == []
+
+
+# I2: the article's side is prepared for the engine once, as the engine prepares it
+class VoicingG2P(FakeG2P):
+    """FakeG2P that voices "*", "#" and digits, as misaki does ("asterisk", "hash", "two")."""
+    SAID = {"*": " asterisk ", "#": " hash ", "1": " one ", "2": " two "}
+
+    def phonemes_for_text(self, text):
+        return super().phonemes_for_text("".join(self.SAID.get(ch, ch) for ch in text))
+
+
+class RecordingG2P(FakeG2P):
+    def __init__(self):
+        self.texts = []
+
+    def phonemes_for_text(self, text):
+        self.texts.append(text)
+        return super().phonemes_for_text(text)
+
+
+MARKUP = ["It was ***truly*** fine.", "# # Hash tags", "1. 2. Two items"]
+
+
+@pytest.mark.parametrize("article", MARKUP)
+def test_markup_that_cleaning_changes_twice_passes_unedited(article):
+    from narration.words import engine_text
+    assert engine_text(engine_text(article)) != engine_text(article)  # cleaning isn't idempotent
+    assert speech_matches(G2P, article, article, []) == []
+    assert speech_matches(VoicingG2P(), article, article, []) == []
+
+
+def test_the_article_side_reaches_the_g2p_as_apply_returns_it():
+    from narration.words import apply, engine_text
+    recording = RecordingG2P()
+    article = "It was ***truly*** fine.\n\n[BREAK]\n\nPope Leo XIV spoke."
+    prepared = "It was ***truly*** fine.\n\nPope Leo the Fourteenth spoke."
+    subs = [Substitution("XIV", "the Fourteenth")]
+    assert speech_matches(recording, article, prepared, subs) == []
+    assert recording.texts == [engine_text(prepared), apply(article, prepared, subs)]
