@@ -151,6 +151,19 @@ def speech_matches(g2p, source: str, prepared: str, substitutions: list[Substitu
             f"'{_around(heard, pb)}'. {OVERRIDE_ADVICE}"]
 
 
+def speech_warnings(g2p, source: str, prepared: str) -> list[str]:
+    """What record warns about before the engine runs: speech_matches, with no
+    substitutions, since a session declares them only at finish. Where the words
+    differ there is no warning: finish's word check judges that, with the declared
+    substitutions. A comparison that can't run is a warning too, never a refusal."""
+    if check(source, prepared, []):
+        return []
+    try:
+        return speech_matches(g2p, source, prepared, [])
+    except RuntimeError as e:  # the G2P adapter's failures
+        return [f"the speech comparison could not run: {e}"]
+
+
 def _near(text: str, phonemes: str, at: int) -> tuple[int, str]:
     """The line (from 1) of `text` that the phonemes at `at` were read from, and its
     words around the word they belong to, overrides shown as their words. The word is

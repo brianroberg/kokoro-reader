@@ -304,9 +304,13 @@ class AgentTools:
         if state["records"] >= MAX_RECORDS:
             raise ToolError(f"record limit reached ({MAX_RECORDS} per article); "
                             + self._what_next(item_id, state))
+        text = self.store.read_text(item_id, "prepared.md")
+        # finish refuses speech the article doesn't have; say so now, before the round
+        # is spent, without refusing. Imported here: the gate imports this module.
+        from narration.gate import speech_warnings
+        warnings = speech_warnings(self.g2p, self.store.read_text(item_id, "source.md"), text)
         state["records"] += 1  # counted before the engine runs
         self.store.save_state(item_id, state)
-        text = self.store.read_text(item_id, "prepared.md")
         final = self.store.path(item_id, "recording.wav")
         tmp = final.with_name(".tmp-recording.wav")
         try:
@@ -318,7 +322,7 @@ class AgentTools:
         state["recorded_sha256"] = _sha256(text)  # what this round's audio says
         self.store.save_state(item_id, state)
         return {"round": state["records"], "duration_seconds": round(duration, 1),
-                "records_left": MAX_RECORDS - state["records"]}
+                "records_left": MAX_RECORDS - state["records"], "speech_warnings": warnings}
 
     @_locked
     def check(self, item_id):

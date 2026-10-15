@@ -873,9 +873,47 @@ def test_finish_runs_the_speech_comparison_with_its_g2p(tmp_path, monkeypatch):
     store = WorkItemStore(tmp_path)
     tools = AgentTools(store, FakeTTS(), FakeVerifier(), FakeG2P())
     item, _ = store.open("Costs fell 5% today.", {})
+    _record_and_check(tools, item)
     compared = []
     monkeypatch.setattr("narration.gate.speech_matches",
                         lambda *args: compared.append(args) or [])
-    _record_and_check(tools, item)
     assert tools.finish(item, "clean", [], [])["ok"]
     assert compared == [(tools.g2p, "Costs fell 5% today.", "Costs fell 5% today.", [])]
+
+
+# I4 (Task 5 fix round 1): record warns, before the engine runs, about speech the
+# article doesn't have; it refuses nothing and counts nothing extra
+def test_record_warns_about_a_sign_only_change_and_still_records(tmp_path):
+    store = WorkItemStore(tmp_path)
+    tts = FakeTTS()
+    tools = AgentTools(store, tts, FakeVerifier(), SignG2P())
+    item, _ = store.open("Costs fell 5% today.", {})
+    out = tools.record(item)
+    assert out["speech_warnings"] == []
+    tools.replace_text(item, "fell 5%", "fell ..-5%")
+    out = tools.record(item)
+    assert out["round"] == 2 and out["records_left"] == MAX_RECORDS - 2 and tts.calls == 2
+    assert store.path(item, "recording.wav").exists()
+    assert len(out["speech_warnings"]) == 1 and "minus" in out["speech_warnings"][0]
+    assert "phonetic override" in out["speech_warnings"][0]
+
+
+def test_record_does_not_warn_about_word_changes_finish_will_judge(tmp_path):
+    store = WorkItemStore(tmp_path)
+    tools = AgentTools(store, FakeTTS(), FakeVerifier(), SignG2P())
+    item, _ = store.open("Pope Leo XIV met.", {})
+    tools.replace_text(item, "XIV", "the Fourteenth")  # declared only at finish
+    assert tools.record(item)["speech_warnings"] == []
+
+
+def test_record_warns_when_the_comparison_cannot_run_and_records_anyway(tmp_path):
+    class BrokenG2P(FakeG2P):
+        def phonemes_for_text(self, text):
+            raise RuntimeError("the speech comparison failed: espeak is missing")
+    store = WorkItemStore(tmp_path)
+    tts = FakeTTS()
+    tools = AgentTools(store, tts, FakeVerifier(), BrokenG2P())
+    item, _ = store.open("Costs fell 5% today.", {})
+    out = tools.record(item)
+    assert tts.calls == 1 and out["speech_warnings"] == [
+        "the speech comparison could not run: the speech comparison failed: espeak is missing"]
