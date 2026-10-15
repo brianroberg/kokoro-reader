@@ -7,17 +7,18 @@ finish accepted:
 - the finish record has the shapes finish allows (agent_tools.validate_finish:
   only an issue's kind and timestamp, and each substitution, reach the notes);
 - the latest record round left a recording, of the text prepared.md holds now
-  (state["recorded_sha256"]);
-- a check of that round returned a report (agent_tools._latest_checks: a failed
-  check is counted in checks_used but has no entry), and its pre-check found
-  nothing, no truncation and no long silence;
+  (state["recorded_sha256"]), and a check of that round returned a report (a
+  failed check is counted in checks_used but has no entry) whose pre-check found
+  nothing, no truncation and no long silence (agent_tools.recording_claims, the
+  code finish runs);
 - the prepared text says what the article says, with exactly the declared
   substitutions, and every override's phonemes came from a lookup
   (agent_tools.validate_substitutions, the code finish runs);
 - the engine would say the same for the prepared text as for the article with
   those substitutions and the prepared text's overrides (speech_matches, which
   finish runs too). The word check can't fully mirror how misaki reads signs,
-  symbols and abbreviations; this compares misaki's own output.
+  symbols and abbreviations; this compares misaki's own output. A G2P that fails
+  raises, as in finish: the runner retries, and nothing is decided.
 An agent's outcome "hold" is a hold, whatever else is true: nothing held is
 published, so its claims aren't checked, as finish doesn't check them. Pure,
 apart from the G2P it is handed."""
@@ -27,7 +28,7 @@ import os
 import re
 from dataclasses import dataclass, field
 
-from narration.agent_tools import (ToolError, _issue, _latest_checks, _sha256, _substitution,
+from narration.agent_tools import (ToolError, _issue, _substitution, recording_claims,
                                    validate_finish, validate_substitutions)
 from narration.words import _PHONETIC, Substitution, apply_with_reason, check, engine_text
 
@@ -210,35 +211,14 @@ def evaluate(state: dict, source: str, prepared: str, metadata: dict, g2p) -> Ga
         held = "; ".join(f"{i['where']} {i['kind']}: {i['note']}" for i in issues)
         return GateResult("hold", outcome, ["the agent held it" + (f" ({held})" if held else "")],
                           notes)
-    reasons = _recording_problems(state, prepared)
+    reasons = recording_claims(state, prepared)
     try:
         validate_substitutions(state, source, prepared, subs)
     except ToolError as e:
         reasons.append(str(e))
     if not reasons:  # the slow check last: its answer can't change a hold
-        try:
-            reasons += speech_matches(g2p, source, prepared,
-                                      [Substitution(s["original"], s["spoken"]) for s in subs])
-        except RuntimeError as e:  # the G2P adapter's failures; a later finalize retries
-            reasons.append(f"the speech comparison could not run: {e}")
+        # A G2P failure (RuntimeError) propagates: finalize then leaves the item
+        # finished, for the runner to retry, rather than holding a good recording.
+        reasons += speech_matches(g2p, source, prepared,
+                                  [Substitution(s["original"], s["spoken"]) for s in subs])
     return GateResult("hold" if reasons else "publish", outcome, reasons, notes)
-
-
-def _recording_problems(state: dict, prepared: str) -> list[str]:
-    """What finish's claims about the recording say, checked again: the latest round
-    recorded this text, and a check of it returned a report with no pre-check warnings."""
-    n = state.get("records", 0)
-    if not n:
-        return ["nothing was recorded"]
-    if state.get("recorded_round") != n:
-        return [f"record round {n} left no recording"]
-    problems = []
-    if _sha256(prepared) != state.get("recorded_sha256"):
-        problems.append(f"the prepared text changed after round {n} was recorded, so the "
-                        "recording does not say it")
-    latest = _latest_checks(state)
-    if not latest:
-        problems.append(f"no check of the latest recording (round {n}) returned a report")
-    elif latest[-1]["warnings"]:
-        problems.append("the latest check's pre-check flagged: " + "; ".join(latest[-1]["warnings"]))
-    return problems

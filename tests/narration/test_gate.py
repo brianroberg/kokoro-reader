@@ -159,7 +159,7 @@ def test_evaluate_holds_when_the_prepared_text_is_not_what_was_recorded():
 def test_evaluate_holds_when_nothing_was_recorded():
     out = evaluate(_state(records=0, recorded_round=None, recorded_sha256=None, checks=[]),
                    ARTICLE, ARTICLE, META, G2P)
-    assert out.action == "hold" and any("nothing was recorded" in r for r in out.reasons)
+    assert out.action == "hold" and any("nothing is recorded" in r for r in out.reasons)
 
 
 @pytest.mark.parametrize("changes", [
@@ -172,7 +172,8 @@ def test_evaluate_holds_when_nothing_was_recorded():
 ])
 def test_evaluate_holds_without_a_successful_check_of_the_latest_round(changes):
     out = evaluate(_state(**changes), ARTICLE, ARTICLE, META, G2P)
-    assert out.action == "hold" and any("no check" in r for r in out.reasons)
+    assert out.action == "hold" and any("check" in r and "latest recording" in r
+                                        for r in out.reasons)
 
 
 @pytest.mark.parametrize("outcome, issues", [("clean", []), ("minor", [ISSUE])])
@@ -228,6 +229,10 @@ def named(tmp_path):
 def test_the_gate_and_finish_share_the_substitution_validation():
     assert gate.validate_substitutions is agent_tools.validate_substitutions
     assert gate.validate_finish is agent_tools.validate_finish
+
+
+def test_the_gate_and_finish_share_the_recording_claims():  # fix round 1, M2
+    assert gate.recording_claims is agent_tools.recording_claims
 
 
 def test_the_gate_publishes_a_declared_override_respelling_that_finish_accepted(named):
@@ -492,10 +497,19 @@ def test_evaluate_holds_when_the_engine_would_say_something_else():
     assert out.action == "publish"  # FakeG2P reads no sign: the comparison decided
 
 
-def test_evaluate_holds_when_the_comparison_cannot_run():
-    out = evaluate(_state(), ARTICLE, ARTICLE, META, BrokenG2P())
-    assert out.action == "hold"
-    assert any("could not run" in r and "espeak is missing" in r for r in out.reasons)
+def test_a_g2p_failure_raises_so_the_item_is_not_finalized(tmp_path):
+    with pytest.raises(RuntimeError, match="espeak is missing"):
+        evaluate(_state(), ARTICLE, ARTICLE, META, BrokenG2P())
+    store, conv = WorkItemStore(tmp_path), FakeConverter()
+    runner = RunnerTools(store, conv, BrokenG2P())
+    tools = AgentTools(store, FakeTTS(), FakeVerifier(), FakeG2P())
+    item = runner.open(ARTICLE, META)["item_id"]
+    tools.record(item); tools.check(item); tools.finish(item, "clean", [], [])
+    with pytest.raises(RuntimeError, match="espeak is missing"):
+        runner.finalize(item)  # the runner marks it failed and retries; nothing is decided
+    assert runner.status(item)["status"] == "finished" and conv.calls == []
+    runner.g2p = FakeG2P()
+    assert runner.finalize(item)["action"] == "publish"
 
 
 def test_the_comparison_runs_only_when_everything_else_holds():

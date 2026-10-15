@@ -917,3 +917,18 @@ def test_record_warns_when_the_comparison_cannot_run_and_records_anyway(tmp_path
     out = tools.record(item)
     assert tts.calls == 1 and out["speech_warnings"] == [
         "the speech comparison could not run: the speech comparison failed: espeak is missing"]
+
+
+
+# M1 (Task 5 fix round 1): a G2P failure in finish is an error, not a verdict
+def test_a_g2p_failure_in_finish_raises_and_the_item_stays_open(tmp_path):
+    class BrokenG2P(FakeG2P):
+        def phonemes_for_text(self, text):
+            raise RuntimeError("the speech comparison failed: espeak is missing")
+    store = WorkItemStore(tmp_path)
+    tools = AgentTools(store, FakeTTS(), FakeVerifier(), BrokenG2P())
+    item, _ = store.open("Costs fell 5% today.", {})
+    _record_and_check(tools, item)
+    with pytest.raises(RuntimeError, match="espeak is missing"):
+        tools.finish(item, "clean", [], [])
+    assert store.load_state(item)["status"] == "open"

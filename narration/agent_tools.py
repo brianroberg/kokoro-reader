@@ -22,8 +22,9 @@ the gate checks too), and check and finish refuse once prepared.md differs from
 it. outcome "hold" is always accepted, whatever was recorded or checked: nothing
 held is published.
 
-validate_finish (the shapes of a finish call) and validate_substitutions (what its
-substitutions must satisfy) are module functions because the gate runs them again
+validate_finish (the shapes of a finish call), recording_claims (what it claims
+about the recording) and validate_substitutions (what its substitutions must
+satisfy) are module functions because the gate runs them again
 on the stored finish record: one implementation, so the gate can't refuse what
 finish accepted, nor the other way round. For the same reason finish runs the gate's
 speech comparison (gate.speech_matches) for outcome clean or minor, so a session
@@ -381,28 +382,10 @@ class AgentTools:
         article with them (gate.speech_matches). The gate runs both again."""
         n = state["records"]
         hold = "finish with outcome 'hold'"
-        if n == 0:
-            raise ToolError("nothing is recorded yet: record and check before finishing with "
-                            f"outcome clean or minor, or {hold}")
-        if state["recorded_round"] != n:
-            raise ToolError(f"record round {n} failed and left no recording; "
-                            + (f"call record again, then check, before finish; or {hold}"
-                               if n < MAX_RECORDS else f"no record rounds are left, so {hold}"))
         prepared = self.store.read_text(item_id, "prepared.md")
-        if not self._unchanged(item_id, state, prepared):
-            raise ToolError(_changed(state))
-        latest = _latest_checks(state)
-        if not latest:
-            if _checks_used(state) >= MAX_CHECKS:
-                raise ToolError(f"the latest recording (round {n}) has no check, and no checks "
-                                f"are left; {hold}")
-            raise ToolError(f"call check on the latest recording before finish; or {hold}")
-        if latest[-1]["warnings"]:
-            flagged = "; ".join(latest[-1]["warnings"]).rstrip(".")
-            advice = ("Fix and re-record, or finish with outcome 'hold'."
-                      if n < MAX_RECORDS and _checks_used(state) < MAX_CHECKS
-                      else "No record round or check is left to fix it: finish with outcome 'hold'.")
-            raise ToolError(f"the latest check's pre-check flagged: {flagged}. {advice}")
+        problems = recording_claims(state, prepared)
+        if problems:
+            raise ToolError(problems[0])
         source = self.store.read_text(item_id, "source.md")
         validate_substitutions(state, source, prepared, subs_in)
         # Imported here: the gate imports this module.
@@ -414,6 +397,38 @@ class AgentTools:
             tail = (f"Then record and check again; or {hold}." if n < MAX_RECORDS
                     else f"No record rounds are left to fix it: {hold}.")
             raise ToolError(f"{problems[0]}. {tail}")
+
+
+def recording_claims(state: dict, prepared: str) -> list[str]:
+    """What outcome clean or minor claims about the recording that fails, in order;
+    [] when it all holds: something was recorded, the latest round left a recording,
+    of `prepared` as it is now (state["recorded_sha256"]), and a check of that round
+    returned a report with no pre-check warnings. finish refuses with the first; the
+    gate holds with all of them. Each says what the session can still do."""
+    n = state.get("records", 0)
+    hold = "finish with outcome 'hold'"
+    if not n:
+        return ["nothing is recorded yet: record and check before finishing with outcome "
+                f"clean or minor, or {hold}"]
+    if state.get("recorded_round") != n:
+        return [f"record round {n} failed and left no recording; "
+                + (f"call record again, then check, before finish; or {hold}"
+                   if n < MAX_RECORDS else f"no record rounds are left, so {hold}")]
+    problems = []
+    if _sha256(prepared) != state.get("recorded_sha256"):
+        problems.append(_changed(state))
+    latest = _latest_checks(state)
+    if not latest:
+        problems.append(f"the latest recording (round {n}) has no check, and no checks are "
+                        f"left; {hold}" if _checks_used(state) >= MAX_CHECKS
+                        else f"call check on the latest recording before finish; or {hold}")
+    elif latest[-1]["warnings"]:
+        flagged = "; ".join(latest[-1]["warnings"]).rstrip(".")
+        advice = ("Fix and re-record, or finish with outcome 'hold'."
+                  if n < MAX_RECORDS and _checks_used(state) < MAX_CHECKS
+                  else "No record round or check is left to fix it: finish with outcome 'hold'.")
+        problems.append(f"the latest check's pre-check flagged: {flagged}. {advice}")
+    return problems
 
 
 def validate_finish(outcome, remaining_issues, substitutions) -> tuple[list[dict], list[dict]]:
