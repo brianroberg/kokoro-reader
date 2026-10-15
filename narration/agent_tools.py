@@ -11,10 +11,17 @@ An override's phonemes must come from the phonemes tool. words.check reads a
 phonemes say, so a session could voice anything under the override's length cap.
 So phonemes() records every lookup in the item's state, and finish accepts an
 override only if its phonemes are what a lookup returned for its displayed word
-or a respelling of it (words.is_respelling, the rule substitutions use)."""
+or a respelling of it (words.is_respelling, the rule substitutions use).
+
+The claims finish accepts are about the text that was recorded: record keeps the
+sha256 of the exact text it handed the engine (state["recorded_sha256"], which
+the gate checks too), and check and finish refuse once prepared.md differs from
+it. outcome "hold" is always accepted, whatever was recorded or checked: nothing
+held is published."""
 from __future__ import annotations
 
 import functools
+import hashlib
 import json
 import os
 import re
@@ -79,6 +86,28 @@ def _speed(speed) -> float:
     return float(speed)
 
 
+def _sha256(text: str) -> str:
+    """The hash of the text as prepared.md stores it (UTF-8)."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _latest_checks(state: dict) -> list[dict]:
+    return [c for c in state["checks"] if c["record"] == state["records"]]
+
+
+def _checks_used(state: dict) -> int:
+    """Check calls so far, failed ones included (state["checks"] holds the ones
+    that returned a report)."""
+    return state.get("checks_used", len(state["checks"]))
+
+
+def _changed(state: dict) -> str:
+    n = state["records"]
+    tail = ("record again, or undo the edit" if n < MAX_RECORDS
+            else "undo the edit (no record rounds are left), or finish with outcome 'hold'")
+    return f"the prepared text changed since round {n} was recorded; {tail}"
+
+
 def _matches(text: str, old: str) -> int:
     """How many times `old` appears in `text`; 2 or more also when two appearances
     overlap ("aa" in "aaa"), which str.count counts once."""
@@ -113,6 +142,8 @@ def _locked(method):
     """Run a tool method under its item's lock; refuse if another call holds it."""
     @functools.wraps(method)
     def wrapper(self, item_id, *args, **kwargs):
+        if not self.store.exists(item_id):
+            raise ValueError("no such work item")
         lock = self.store.item_lock(item_id)
         if not lock.acquire(blocking=False):
             raise ToolError("another call is in progress for this work item; wait for it to finish")
@@ -131,8 +162,28 @@ class AgentTools:
     def _open_state(self, item_id):
         state = self.store.load_state(item_id)
         if state["status"] != "open":
-            raise ToolError("this work item is finished; no further tool calls are accepted")
+            raise ToolError(f"this work item is {state['status']}; no further tool calls are accepted")
         return state
+
+    def _unchanged(self, item_id, state, text=None) -> bool:
+        """Whether prepared.md is still the text the latest round recorded."""
+        if text is None:
+            text = self.store.read_text(item_id, "prepared.md")
+        return _sha256(text) == state.get("recorded_sha256")
+
+    def _what_next(self, item_id, state) -> str:
+        """How the session can still finish, for a refusal at a limit."""
+        n, latest = state["records"], _latest_checks(state)
+        hold = "finish with outcome 'hold'"
+        if (not n or state["recorded_round"] != n or (latest and latest[-1]["warnings"])
+                or (not latest and _checks_used(state) >= MAX_CHECKS)):
+            return hold
+        steps = []
+        if not self._unchanged(item_id, state):
+            steps.append(f"undo the edits made since round {n} was recorded")
+        if not latest:
+            steps.append(f"call check on round {n}")
+        return ", then ".join(steps + ["finish with outcome clean or minor"]) + f"; or {hold}"
 
     @_locked
     def get_text(self, item_id):
@@ -166,13 +217,13 @@ class AgentTools:
     @_locked
     def record(self, item_id, voice=None, speed=1.0):
         state = self._open_state(item_id)
-        voice = voice or self.default_voice
+        voice = self.default_voice if voice is None else voice
         if not isinstance(voice, str) or not VOICE_RE.fullmatch(voice):
             raise ToolError(f"voice must look like 'af_heart'; got {voice!r}")
         speed = _speed(speed)
         if state["records"] >= MAX_RECORDS:
             raise ToolError(f"record limit reached ({MAX_RECORDS} per article); "
-                            "finish with the best result so far, or with outcome 'hold'")
+                            + self._what_next(item_id, state))
         state["records"] += 1  # counted before the engine runs
         self.store.save_state(item_id, state)
         text = self.store.read_text(item_id, "prepared.md")
@@ -184,6 +235,7 @@ class AgentTools:
         finally:
             tmp.unlink(missing_ok=True)  # a failed run's partial file
         state["recorded_round"] = state["records"]
+        state["recorded_sha256"] = _sha256(text)  # what this round's audio says
         self.store.save_state(item_id, state)
         return {"round": state["records"], "duration_seconds": round(duration, 1),
                 "records_left": MAX_RECORDS - state["records"]}
@@ -191,17 +243,26 @@ class AgentTools:
     @_locked
     def check(self, item_id):
         state = self._open_state(item_id)
-        if state["records"] == 0:
+        n = state["records"]
+        if n == 0:
             raise ToolError("nothing to check yet: call record first")
-        if state["recorded_round"] != state["records"] or not self.store.path(item_id, "recording.wav").exists():
-            raise ToolError(f"record round {state['records']} failed and left no recording; call record again")
-        if len(state["checks"]) >= MAX_CHECKS:
-            raise ToolError(f"check limit reached ({MAX_CHECKS} per article)")
+        wav = self.store.path(item_id, "recording.wav")
+        if state["recorded_round"] != n or not wav.exists():
+            raise ToolError(f"record round {n} failed and left no recording; "
+                            + ("call record again" if n < MAX_RECORDS
+                               else "no record rounds are left, so finish with outcome 'hold'"))
+        if _checks_used(state) >= MAX_CHECKS:
+            raise ToolError(f"check limit reached ({MAX_CHECKS} per article); "
+                            + self._what_next(item_id, state))
         text = self.store.read_text(item_id, "prepared.md")
-        report, warnings = self.verifier.check(self.store.path(item_id, "recording.wav"), text)
-        n = len(state["checks"]) + 1
-        self.store.write_text(item_id, f"report-{n}.txt", report)
-        state["checks"].append({"n": n, "record": state["records"], "warnings": list(warnings)})
+        if not self._unchanged(item_id, state, text):
+            raise ToolError(_changed(state))
+        attempt = _checks_used(state) + 1
+        state["checks_used"] = attempt  # counted before the verifier runs, as record is
+        self.store.save_state(item_id, state)
+        report, warnings = self.verifier.check(wav, text)
+        self.store.write_text(item_id, f"report-{attempt}.txt", report)
+        state["checks"].append({"n": attempt, "record": n, "warnings": list(warnings)})
         self.store.save_state(item_id, state)
         return {"report": report, "precheck_warnings": list(warnings)}
 
@@ -230,16 +291,49 @@ class AgentTools:
                             "substitutions")
         issues = [_issue(i) for i in remaining_issues]
         subs_in = [_substitution(s) for s in substitutions]
-        if state["records"] and state["recorded_round"] != state["records"]:
-            raise ToolError(f"record round {state['records']} failed and left no recording; "
-                            "call record again, then check, before finish")
-        latest = [c for c in state["checks"] if c["record"] == state["records"]]
-        if state["records"] == 0 or not latest:
-            raise ToolError("call check on the latest recording before finish")
-        if outcome in ("clean", "minor") and latest[-1]["warnings"]:
-            raise ToolError("the latest check's pre-check flagged: " + "; ".join(latest[-1]["warnings"])
-                            + ". Fix and re-record, or finish with outcome 'hold'.")
+        if outcome == "clean" and issues:
+            raise ToolError("outcome 'clean' means no remaining issues: use 'minor' for small "
+                            "ones, or fix them")
+        if outcome != "clean" and not issues:
+            raise ToolError(f"outcome {outcome!r} needs at least one remaining issue saying what "
+                            "is wrong")
+        if outcome != "hold":  # nothing held is published, so hold needs no claims
+            self._check_claims(item_id, state, subs_in)
+        state["finish"] = {"outcome": outcome, "remaining_issues": issues, "substitutions": subs_in}
+        state["status"] = "finished"
+        self.store.save_state(item_id, state)
+        self.store.write_text(item_id, "result.json", json.dumps(state["finish"]))
+        self.store.revoke(item_id)
+        return {"ok": True}
+
+    def _check_claims(self, item_id, state, subs_in):
+        """What outcome clean or minor claims: the latest round recorded the text as it
+        is now, a check of that round found no pre-check warnings, the text says what
+        the article says, and every override's phonemes came from the phonemes tool."""
+        n = state["records"]
+        hold = "finish with outcome 'hold'"
+        if n == 0:
+            raise ToolError("nothing is recorded yet: record and check before finishing with "
+                            f"outcome clean or minor, or {hold}")
+        if state["recorded_round"] != n:
+            raise ToolError(f"record round {n} failed and left no recording; "
+                            + (f"call record again, then check, before finish; or {hold}"
+                               if n < MAX_RECORDS else f"no record rounds are left, so {hold}"))
         prepared = self.store.read_text(item_id, "prepared.md")
+        if not self._unchanged(item_id, state, prepared):
+            raise ToolError(_changed(state))
+        latest = _latest_checks(state)
+        if not latest:
+            if _checks_used(state) >= MAX_CHECKS:
+                raise ToolError(f"the latest recording (round {n}) has no check, and no checks "
+                                f"are left; {hold}")
+            raise ToolError(f"call check on the latest recording before finish; or {hold}")
+        if latest[-1]["warnings"]:
+            flagged = "; ".join(latest[-1]["warnings"]).rstrip(".")
+            advice = ("Fix and re-record, or finish with outcome 'hold'."
+                      if n < MAX_RECORDS and _checks_used(state) < MAX_CHECKS
+                      else "No record round or check is left to fix it: finish with outcome 'hold'.")
+            raise ToolError(f"the latest check's pre-check flagged: {flagged}. {advice}")
         problems = words_check(self.store.read_text(item_id, "source.md"), prepared,
                                [Substitution(s["original"], s["spoken"]) for s in subs_in])
         if problems:
@@ -249,9 +343,3 @@ class AgentTools:
         if unproven:
             raise ToolError("; ".join(unproven[:MAX_SHOWN])
                             + ("; and more overrides like these" if len(unproven) > MAX_SHOWN else ""))
-        state["finish"] = {"outcome": outcome, "remaining_issues": issues, "substitutions": subs_in}
-        state["status"] = "finished"
-        self.store.save_state(item_id, state)
-        self.store.write_text(item_id, "result.json", json.dumps(state["finish"]))
-        self.store.revoke(item_id)
-        return {"ok": True}

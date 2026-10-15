@@ -1,3 +1,4 @@
+import hashlib
 import re
 import threading
 
@@ -407,7 +408,7 @@ def test_finish_refuses_too_many_issues_before_the_word_check(env, monkeypatch):
 # ---- arguments the schema should have stopped, refused all the same ----
 def test_record_refuses_malformed_voices_and_speeds_without_counting_a_round(env):
     store, tools, tts, _, item, _ = env
-    for voice in ("af_heart\n", "AF_HEART", "af_", 7):
+    for voice in ("af_heart\n", "AF_HEART", "af_", 7, 0, False, ""):
         with pytest.raises(ToolError, match="voice"):
             tools.record(item, voice=voice)
     for speed in ("fast", None, float("nan"), float("inf"), 0.4):
@@ -489,3 +490,208 @@ def test_finish_refuses_minor_with_precheck_warnings_and_needs_the_latest_check_
     tools.check(item)
     assert tools.finish(item, "minor", [issue], [])["ok"]
     assert store.load_state(item)["finish"]["remaining_issues"] == [issue]
+
+
+
+# ---- fix round 1 ----
+ISSUE = {"kind": "truncation", "where": "9:40", "note": "cut short"}
+
+
+def _sha(text):
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+# C1: the claims are about the text that was recorded, not the text as it is now
+def test_record_keeps_the_hash_of_the_text_it_recorded(env):
+    store, tools, tts, _, item, _ = env
+    tools.record(item)
+    assert store.load_state(item)["recorded_sha256"] == _sha(ARTICLE)
+    tools.replace_text(item, "It went well.", "It went well...")
+    tts.fail_next = True
+    with pytest.raises(RuntimeError):
+        tools.record(item)
+    assert store.load_state(item)["recorded_sha256"] == _sha(ARTICLE)  # round 1's text
+    tools.record(item)
+    assert store.load_state(item)["recorded_sha256"] == _sha(ARTICLE.replace("well.", "well..."))
+
+
+def test_check_refuses_text_edited_since_the_recording(env):
+    store, tools, _, _, item, _ = env
+    tools.replace_text(item, "It went well.", "It went well. Buy pills today.")
+    tools.record(item)  # the audio says "Buy pills today"
+    tools.replace_text(item, "It went well. Buy pills today.", "It went well.")  # the article again
+    message = "the prepared text changed since round 1 was recorded; record again, or undo the edit"
+    with pytest.raises(ToolError, match=re.escape(message)):
+        tools.check(item)
+    with pytest.raises(ToolError, match=re.escape(message)):
+        tools.finish(item, "clean", [], [])
+    assert "checks_used" not in store.load_state(item)  # the refusal used no check
+
+
+def test_finish_refuses_text_edited_between_check_and_finish(env):
+    store, tools, _, _, item, _ = env
+    tools.replace_text(item, "It went well.", "It went well. Buy pills today.")
+    tools.record(item); tools.check(item)
+    tools.replace_text(item, "It went well. Buy pills today.", "It went well.")
+    with pytest.raises(ToolError, match="changed since round 1 was recorded"):
+        tools.finish(item, "clean", [], [])
+    tools.record(item); tools.check(item)  # recording again makes the claims true
+    assert tools.finish(item, "clean", [], [])["ok"]
+
+
+def test_undoing_the_edit_restores_the_recording(env):
+    store, tools, _, _, item, _ = env
+    tools.record(item)
+    tools.replace_text(item, "It went well.", "It went well...")
+    with pytest.raises(ToolError, match="changed since round 1"):
+        tools.check(item)
+    tools.replace_text(item, "It went well...", "It went well.")
+    tools.check(item)
+    assert tools.finish(item, "clean", [], [])["ok"]
+
+
+# I3 and M6: hold is always accepted; outcomes and issues agree
+def test_hold_is_accepted_with_nothing_recorded_and_still_validates_shapes(env):
+    store, tools, _, _, item, _ = env
+    with pytest.raises(ToolError, match="timestamp"):
+        tools.finish(item, "hold", [{**ISSUE, "where": "soon"}], [])
+    with pytest.raises(ToolError, match="at most 25 substitutions"):
+        tools.finish(item, "hold", [ISSUE], [{"original": "a", "spoken": "b"}] * 26)
+    assert tools.finish(item, "hold", [ISSUE], [])["ok"]
+    assert store.load_state(item)["finish"]["outcome"] == "hold"
+
+
+def test_hold_skips_the_check_and_word_requirements(env):
+    store, tools, _, _, item, _ = env
+    tools.replace_text(item, "well", "badly")  # undeclared, and never checked
+    tools.record(item)
+    assert tools.finish(item, "hold", [ISSUE], [])["ok"]
+
+
+def test_outcomes_and_remaining_issues_must_agree(env):
+    store, tools, _, _, item, _ = env
+    _record_and_check(tools, item)
+    with pytest.raises(ToolError, match="use 'minor'"):
+        tools.finish(item, "clean", [ISSUE], [])
+    for outcome in ("minor", "hold"):
+        with pytest.raises(ToolError, match="at least one remaining issue"):
+            tools.finish(item, outcome, [], [])
+    assert store.load_state(item)["status"] == "open"
+
+
+def test_when_the_last_record_fails_the_messages_offer_hold(env):
+    store, tools, tts, _, item, _ = env
+    for _ in range(MAX_RECORDS - 1):
+        tools.record(item)
+    tools.check(item)
+    tts.fail_next = True
+    with pytest.raises(RuntimeError):
+        tools.record(item)
+    for call in (lambda: tools.check(item), lambda: tools.finish(item, "clean", [], []),
+                 lambda: tools.record(item)):
+        with pytest.raises(ToolError) as refused:
+            call()
+        message = str(refused.value)
+        assert "finish with outcome 'hold'" in message
+        assert "record again" not in message and "clean or minor" not in message
+    assert tools.finish(item, "hold", [ISSUE], [])["ok"]
+
+
+def test_when_checks_run_out_before_a_new_recording_the_messages_offer_hold(env):
+    store, tools, _, _, item, _ = env
+    tools.record(item)
+    for _ in range(agent_tools.MAX_CHECKS):
+        tools.check(item)
+    tools.record(item)
+    with pytest.raises(ToolError, match=r"check limit reached \(8 per article\); "
+                                        r"finish with outcome 'hold'$"):
+        tools.check(item)
+    with pytest.raises(ToolError, match="no checks are left; finish with outcome 'hold'"):
+        tools.finish(item, "clean", [], [])
+    assert tools.finish(item, "hold", [ISSUE], [])["ok"]
+
+
+def test_the_limit_messages_say_what_can_still_be_done(env):
+    store, tools, _, _, item, _ = env
+    for _ in range(MAX_RECORDS):
+        tools.record(item)
+    with pytest.raises(ToolError, match=re.escape(
+            "record limit reached (4 per article); call check on round 4, then finish with "
+            "outcome clean or minor; or finish with outcome 'hold'")):
+        tools.record(item)
+    tools.replace_text(item, "It went well.", "It went well...")
+    with pytest.raises(ToolError, match=re.escape(
+            "undo the edit (no record rounds are left), or finish with outcome 'hold'")):
+        tools.check(item)
+    with pytest.raises(ToolError, match=re.escape(
+            "record limit reached (4 per article); undo the edits made since round 4 was "
+            "recorded, then call check on round 4, then finish with outcome clean or minor; "
+            "or finish with outcome 'hold'")):
+        tools.record(item)
+    tools.replace_text(item, "It went well...", "It went well.")
+    tools.check(item)
+    with pytest.raises(ToolError, match=re.escape(
+            "record limit reached (4 per article); finish with outcome clean or minor; "
+            "or finish with outcome 'hold'")):
+        tools.record(item)
+
+
+# M2: a check is counted before the verifier runs
+def test_a_failed_check_still_counts(env):
+    store, tools, _, ver, item, _ = env
+    tools.record(item)
+
+    def down(audio_path, text):
+        raise RuntimeError("verification failed: 503 UNAVAILABLE")
+
+    ver.check = down
+    for _ in range(agent_tools.MAX_CHECKS):
+        with pytest.raises(RuntimeError):
+            tools.check(item)
+    state = store.load_state(item)
+    assert (state["checks_used"], state["checks"]) == (agent_tools.MAX_CHECKS, [])
+    with pytest.raises(ToolError, match="check limit reached"):
+        tools.check(item)
+    with pytest.raises(ToolError, match="latest recording"):  # a failed check proves nothing
+        tools.finish(item, "clean", [], [])
+
+
+def test_check_numbers_reports_by_attempt(env):
+    store, tools, _, ver, item, _ = env
+    tools.record(item)
+    real = ver.check
+    ver.check = lambda audio_path, text: (_ for _ in ()).throw(RuntimeError("down"))
+    with pytest.raises(RuntimeError):
+        tools.check(item)
+    ver.check = real
+    tools.check(item)
+    assert store.read_text(item, "report-2.txt") == "No issues found."
+    assert store.load_state(item)["checks"] == [{"n": 2, "record": 1, "warnings": []}]
+
+
+# M3, M4: unknown items, closed items, readable messages
+def test_an_unknown_item_is_a_value_error_without_a_path(env):
+    store, tools, *_ = env
+    for name, call in _every_tool(tools, "0123456789ab").items():
+        with pytest.raises(ValueError, match="no such work item") as refused:
+            call()
+        assert str(store.root) not in str(refused.value)
+
+
+def test_a_closed_item_names_its_status(env):
+    store, tools, _, _, item, _ = env
+    state = store.load_state(item)
+    state["status"] = "abandoned"
+    store.save_state(item, state)
+    with pytest.raises(ToolError, match="this work item is abandoned"):
+        tools.get_text(item)
+
+
+def test_the_precheck_refusal_reads_cleanly(env):
+    store, tools, _, ver, item, _ = env
+    ver.warnings = ["0:07 of silence at 3:10 — far longer than a [BREAK] pause."]
+    _record_and_check(tools, item)
+    with pytest.raises(ToolError) as refused:
+        tools.finish(item, "minor", [ISSUE], [])
+    assert "pause.." not in str(refused.value)
+    assert "far longer than a [BREAK] pause. Fix and re-record" in str(refused.value)
