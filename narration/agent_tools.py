@@ -20,7 +20,12 @@ The claims finish accepts are about the text that was recorded: record keeps the
 sha256 of the exact text it handed the engine (state["recorded_sha256"], which
 the gate checks too), and check and finish refuse once prepared.md differs from
 it. outcome "hold" is always accepted, whatever was recorded or checked: nothing
-held is published."""
+held is published.
+
+validate_finish (the shapes of a finish call) and validate_substitutions (what its
+substitutions must satisfy) are module functions because the gate runs them again
+on the stored finish record: one implementation, so the gate can't refuse what
+finish accepted, nor the other way round."""
 from __future__ import annotations
 
 import functools
@@ -331,22 +336,7 @@ class AgentTools:
     @_locked
     def finish(self, item_id, outcome, remaining_issues, substitutions):
         state = self._open_state(item_id)
-        if outcome not in OUTCOMES:
-            raise ToolError(f"outcome must be one of {OUTCOMES}")
-        # Both counts are bounded before any entry is read, so a huge list costs nothing.
-        if not isinstance(remaining_issues, list) or len(remaining_issues) > MAX_ISSUES:
-            raise ToolError(f"remaining_issues must be a list of at most {MAX_ISSUES}")
-        if not isinstance(substitutions, list) or len(substitutions) > MAX_SUBSTITUTIONS:
-            raise ToolError(f"substitutions must be a list of at most {MAX_SUBSTITUTIONS} "
-                            "substitutions")
-        issues = [_issue(i) for i in remaining_issues]
-        subs_in = [_substitution(s) for s in substitutions]
-        if outcome == "clean" and issues:
-            raise ToolError("outcome 'clean' means no remaining issues: use 'minor' for small "
-                            "ones, or fix them")
-        if outcome != "clean" and not issues:
-            raise ToolError(f"outcome {outcome!r} needs at least one remaining issue saying what "
-                            "is wrong")
+        issues, subs_in = validate_finish(outcome, remaining_issues, substitutions)
         if outcome != "hold":  # nothing held is published, so hold needs no claims
             self._check_claims(item_id, state, subs_in)
         state["finish"] = {"outcome": outcome, "remaining_issues": issues, "substitutions": subs_in}
@@ -358,8 +348,9 @@ class AgentTools:
 
     def _check_claims(self, item_id, state, subs_in):
         """What outcome clean or minor claims: the latest round recorded the text as it
-        is now, a check of that round found no pre-check warnings, the text says what
-        the article says, and every override's phonemes came from the phonemes tool."""
+        is now, a check of that round found no pre-check warnings, and the text says
+        what the article says with exactly the declared substitutions
+        (validate_substitutions, which the gate runs too)."""
         n = state["records"]
         hold = "finish with outcome 'hold'"
         if n == 0:
@@ -384,23 +375,62 @@ class AgentTools:
                       if n < MAX_RECORDS and _checks_used(state) < MAX_CHECKS
                       else "No record round or check is left to fix it: finish with outcome 'hold'.")
             raise ToolError(f"the latest check's pre-check flagged: {flagged}. {advice}")
-        declared = [(tuple(words(s["original"])), tuple(words(s["spoken"]))) for s in subs_in]
-        twice = [s for k, s in enumerate(subs_in) if declared[k] in declared[:k]]
-        if twice:
-            raise ToolError("; ".join(f"substitution {s['original']!r} -> {s['spoken']!r} is "
-                                      "declared twice" for s in twice) + ". Declare each once.")
-        subs = [Substitution(s["original"], s["spoken"]) for s in subs_in]
-        problems, applied = audit(self.store.read_text(item_id, "source.md"), prepared, subs)
-        if problems:
-            raise ToolError("the prepared text differs from the article: " + "; ".join(problems)
-                            + ". Declare each word change in substitutions, or undo it.")
-        unproven, respellings = _unproven_overrides(state, prepared, declared, MAX_SHOWN + 1)
-        if unproven:
-            raise ToolError("; ".join(unproven[:MAX_SHOWN])
-                            + ("; and more overrides like these" if len(unproven) > MAX_SHOWN else ""))
-        unused = [s for k, (s, sub) in enumerate(zip(subs_in, subs))
-                  if not applied.get(sub) and k not in respellings]
-        if unused:
-            raise ToolError("; ".join(f"substitution {s['original']!r} -> {s['spoken']!r} is "
-                                      "declared but the prepared text does not use it"
-                                      for s in unused) + ". Remove it from substitutions.")
+        validate_substitutions(state, self.store.read_text(item_id, "source.md"), prepared, subs_in)
+
+
+def validate_finish(outcome, remaining_issues, substitutions) -> tuple[list[dict], list[dict]]:
+    """The shapes a finish call may have, as (issues, substitutions) in the form
+    state["finish"] keeps them; ToolError if any is wrong. finish checks its arguments
+    with this, and the gate checks the stored finish record with it again, since only
+    an issue's kind and timestamp, and each substitution, reach the published notes."""
+    if outcome not in OUTCOMES:
+        raise ToolError(f"outcome must be one of {OUTCOMES}")
+    # Both counts are bounded before any entry is read, so a huge list costs nothing.
+    if not isinstance(remaining_issues, list) or len(remaining_issues) > MAX_ISSUES:
+        raise ToolError(f"remaining_issues must be a list of at most {MAX_ISSUES}")
+    if not isinstance(substitutions, list) or len(substitutions) > MAX_SUBSTITUTIONS:
+        raise ToolError(f"substitutions must be a list of at most {MAX_SUBSTITUTIONS} "
+                        "substitutions")
+    issues = [_issue(i) for i in remaining_issues]
+    subs_in = [_substitution(s) for s in substitutions]
+    if outcome == "clean" and issues:
+        raise ToolError("outcome 'clean' means no remaining issues: use 'minor' for small "
+                        "ones, or fix them")
+    if outcome != "clean" and not issues:
+        raise ToolError(f"outcome {outcome!r} needs at least one remaining issue saying what "
+                        "is wrong")
+    return issues, subs_in
+
+
+def validate_substitutions(state: dict, source: str, prepared: str, subs_in: list[dict]) -> None:
+    """The one check of a finish call's substitutions, which finish and the gate both
+    run, so the gate can't refuse what finish accepted or the other way round. Raises
+    ToolError at the first rule that fails:
+    - each substitution is declared once (compared as words());
+    - the prepared text says what the article says, with them (words.audit);
+    - every override's phonemes came from a phonemes() lookup (_unproven_overrides);
+    - every declaration is used: audit applies it at least once, or it is an
+      override-respelling, {original: an override's display, spoken: the word whose
+      lookup gave its phonemes}, which audit applies 0 times because it names an
+      override's pronunciation, not a change to the text.
+    `state` supplies the item's lookups (state["phoneme_lookups"])."""
+    declared = [(tuple(words(s["original"])), tuple(words(s["spoken"]))) for s in subs_in]
+    twice = [s for k, s in enumerate(subs_in) if declared[k] in declared[:k]]
+    if twice:
+        raise ToolError("; ".join(f"substitution {s['original']!r} -> {s['spoken']!r} is "
+                                  "declared twice" for s in twice) + ". Declare each once.")
+    subs = [Substitution(s["original"], s["spoken"]) for s in subs_in]
+    problems, applied = audit(source, prepared, subs)
+    if problems:
+        raise ToolError("the prepared text differs from the article: " + "; ".join(problems)
+                        + ". Declare each word change in substitutions, or undo it.")
+    unproven, respellings = _unproven_overrides(state, prepared, declared, MAX_SHOWN + 1)
+    if unproven:
+        raise ToolError("; ".join(unproven[:MAX_SHOWN])
+                        + ("; and more overrides like these" if len(unproven) > MAX_SHOWN else ""))
+    unused = [s for k, (s, sub) in enumerate(zip(subs_in, subs))
+              if not applied.get(sub) and k not in respellings]
+    if unused:
+        raise ToolError("; ".join(f"substitution {s['original']!r} -> {s['spoken']!r} is "
+                                  "declared but the prepared text does not use it"
+                                  for s in unused) + ". Remove it from substitutions.")
