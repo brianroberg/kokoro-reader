@@ -1,6 +1,7 @@
 """Fake engines for tests and for `python -m narration --fake-engines`."""
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 
@@ -9,6 +10,7 @@ class FakeTTS:
         self.calls = 0
         self.fail_next = False
         self.hold = None  # (started, release) Events: when set, a run blocks between them
+        self.hold_timeout = 10.0  # seconds a held run waits for release before it fails
 
     def record(self, text, out_path, voice, speed):
         self.calls += 1
@@ -19,7 +21,8 @@ class FakeTTS:
         if self.hold:
             started, release = self.hold
             started.set()
-            release.wait()
+            if not release.wait(self.hold_timeout):
+                raise RuntimeError("fake engine held, and never released")
         Path(out_path).write_bytes(b"RIFF fake wav")
         return 60.0
 
@@ -36,6 +39,17 @@ class FakeVerifier:
 class FakeG2P:
     def phonemes(self, word):
         return "fəˈnɛt"
+
+
+class FakeLinkG2P(FakeG2P):
+    """Like misaki with its preprocessing on: "[word](/phonemes/)" link syntax in the
+    input comes back as the phonemes inside it. For tests that such input never
+    reaches the G2P."""
+    _LINK = re.compile(r"\[[^\]]+\]\(/([^)]*)/\)")
+
+    def phonemes(self, word):
+        link = self._LINK.search(word)
+        return link.group(1) if link else super().phonemes(word)
 
 
 class FakeConverter:

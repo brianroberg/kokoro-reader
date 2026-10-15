@@ -151,6 +151,21 @@ class TestVerifyAudio:
         assert call_args.kwargs.get("model") == "gemini-2.5-pro" or "gemini-2.5-pro" in str(call_args)
 
     @patch("verify_audio.genai")
+    def test_uses_audio_already_decoded_by_the_caller(self, mock_genai, tmp_path):
+        """A caller that decoded the WAV (for its own pre-check) passes it in;
+        verify_audio then reads the file only to upload it."""
+        mock_gemini_client(mock_genai, "No issues found.")
+        audio_path = make_wav(tmp_path / "audio.wav", [("tone", 4000)])
+        decoded = AudioSegment.from_wav(audio_path)
+
+        with patch("verify_audio.AudioSegment.from_wav", side_effect=AssertionError("decoded twice")):
+            result = verify_audio(audio_path, "one two three four five six seven eight nine ten",
+                                  audio=decoded)
+
+        assert result.startswith("## Pre-check") and "0:04" in result
+        assert "No issues found." in result
+
+    @patch("verify_audio.genai")
     def test_report_starts_with_precheck(self, mock_genai, tmp_path):
         """Test the returned report leads with the deterministic pre-check."""
         mock_gemini_client(mock_genai, "No issues found.")

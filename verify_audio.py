@@ -155,7 +155,8 @@ def check_single_call_limit(duration_ms: int, description: str) -> None:
         )
 
 
-def verify_audio(audio_path: str, source_text: str, model: str = DEFAULT_MODEL) -> str:
+def verify_audio(audio_path: str, source_text: str, model: str = DEFAULT_MODEL,
+                 audio: AudioSegment | None = None) -> str:
     """Verify a TTS audio recording against its source text using Gemini.
 
     Runs a deterministic pre-check, then — when the audio's [BREAK]
@@ -167,6 +168,8 @@ def verify_audio(audio_path: str, source_text: str, model: str = DEFAULT_MODEL) 
         audio_path: Path to the audio file (.wav)
         source_text: The original text that was read aloud
         model: Gemini model to use for verification
+        audio: The file already decoded, if the caller has it (the file is
+            then read only to upload it)
 
     Returns:
         The pre-check stats followed by the model's assessment
@@ -179,7 +182,8 @@ def verify_audio(audio_path: str, source_text: str, model: str = DEFAULT_MODEL) 
     if not os.path.exists(audio_path):
         raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
-    audio = AudioSegment.from_wav(audio_path)
+    if audio is None:
+        audio = AudioSegment.from_wav(audio_path)
     precheck = precheck_report(audio, source_text)
 
     client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
