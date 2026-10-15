@@ -37,8 +37,19 @@ class FakeVerifier:
 
 
 class FakeG2P:
+    """Deterministic phonemes. A lookup always answers "fəˈnɛt". A whole text is read
+    line by line, as the engine's pipeline splits it: each line's words lowercased and
+    joined by spaces, an override "[word](/p/)" read as p, punctuation dropped."""
+    _SPEECH = re.compile(r"\[[^\[\]]+\]\(/([^)\[]*)/\)|[^\W_]+(?:'[^\W_]+)*")
+
     def phonemes(self, word):
         return "fəˈnɛt"
+
+    def phonemes_for_text(self, text):
+        lines = [line for line in re.split(r"\n+", text.strip()) if line.strip()]
+        return "\n".join(" ".join(m.group(1).strip("/") if m.group(1) is not None
+                                  else m.group().lower() for m in self._SPEECH.finditer(line))
+                         for line in lines)
 
 
 class FakeLinkG2P(FakeG2P):

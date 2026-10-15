@@ -405,6 +405,7 @@ def test_finish_refuses_too_many_substitutions_before_the_word_check(env, monkey
     _record_and_check(tools, item)
     calls = []
     monkeypatch.setattr(agent_tools, "audit", _counting_audit(calls))
+    monkeypatch.setattr("narration.gate.speech_matches", lambda *args: [])  # a later stage
     sub = {"original": "XIV", "spoken": "the Fourteenth", "why": "numeral"}
     for n in (agent_tools.MAX_SUBSTITUTIONS + 1, 10_000):
         with pytest.raises(ToolError, match="at most 25 substitutions"):
@@ -757,7 +758,7 @@ def test_an_override_cannot_launder_its_own_phonemes_through_the_lookup(linked):
 
 
 # I1: a respelled lookup changes the reading only when declared, and is published
-class SpellingG2P:
+class SpellingG2P(FakeG2P):
     """Phonemes that differ per word, so a test can tell lookups apart."""
     def phonemes(self, word):
         return "ˈ" + word.lower()
@@ -846,3 +847,35 @@ def test_proven_overrides_need_no_respelling_comparisons(tmp_path, monkeypatch):
     assert tools.finish(item, "clean", [], [])["ok"]
     assert respellings == []
     assert len(word_calls) <= 2 * len(names)  # once per lookup, once per case-folded display
+
+
+
+# R3 (Task 5): finish compares what the engine would say, so the agent learns before finalize
+class SignG2P(FakeG2P):
+    """FakeG2P that voices a minus before a digit even after dots, as misaki does."""
+    def phonemes_for_text(self, text):
+        return super().phonemes_for_text(re.sub(r"-(?=\d)", " minus ", text))
+
+
+def test_finish_refuses_a_text_the_engine_would_read_differently(tmp_path):
+    store = WorkItemStore(tmp_path)
+    tools = AgentTools(store, FakeTTS(), FakeVerifier(), SignG2P())
+    item, _ = store.open("Costs fell 5% today.", {})
+    tools.replace_text(item, "fell 5%", "fell ..-5%")  # the word check reads "5%"
+    _record_and_check(tools, item)
+    with pytest.raises(ToolError, match=r"the engine would not say what the article says.*minus"):
+        tools.finish(item, "clean", [], [])
+    assert store.load_state(item)["status"] == "open"
+    assert tools.finish(item, "hold", [ISSUE], [])["ok"]  # hold needs no claims
+
+
+def test_finish_runs_the_speech_comparison_with_its_g2p(tmp_path, monkeypatch):
+    store = WorkItemStore(tmp_path)
+    tools = AgentTools(store, FakeTTS(), FakeVerifier(), FakeG2P())
+    item, _ = store.open("Costs fell 5% today.", {})
+    compared = []
+    monkeypatch.setattr("narration.gate.speech_matches",
+                        lambda *args: compared.append(args) or [])
+    _record_and_check(tools, item)
+    assert tools.finish(item, "clean", [], [])["ok"]
+    assert compared == [(tools.g2p, "Costs fell 5% today.", "Costs fell 5% today.", [])]

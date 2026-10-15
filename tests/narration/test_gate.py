@@ -1,5 +1,6 @@
 import hashlib
 import json
+import re
 import threading
 
 import pytest
@@ -7,21 +8,23 @@ import pytest
 from narration import agent_tools, gate
 from narration.agent_tools import MAX_ISSUES, MAX_NOTE, AgentTools, ToolError
 from narration.fakes import FakeConverter, FakeG2P, FakeTTS, FakeVerifier
-from narration.gate import evaluate, notes_for
+from narration.gate import evaluate, notes_for, speech_matches
 from narration.runner_tools import RunnerTools
+from narration.words import Substitution, check
 from narration.workitems import WorkItemStore
 
 META = {"title": "Zoning Alone", "authors": ["Joseph Lawler"], "publication": "The New Atlantis",
         "issue_number": "86", "issue_season": "Fall 2026",
         "description": "Zoning made us lonely."}
 ARTICLE = "Zoning made us lonely.\n\nThe Court may end it."
+G2P = FakeG2P()
 
 
 @pytest.fixture
 def env(tmp_path):
     store = WorkItemStore(tmp_path)
     conv = FakeConverter()
-    runner = RunnerTools(store, conv)
+    runner = RunnerTools(store, conv, FakeG2P())
     tools = AgentTools(store, FakeTTS(), FakeVerifier(), FakeG2P())
     opened = runner.open(ARTICLE, META)
     return store, runner, tools, conv, opened["item_id"], opened["agent_token"]
@@ -106,7 +109,7 @@ def test_evaluate_holds_when_the_latest_round_has_no_recording():
     state = {"status": "finished", "records": 2, "recorded_round": 1,
              "checks": [{"n": 1, "record": 1, "warnings": []}],
              "finish": {"outcome": "clean", "remaining_issues": [], "substitutions": []}}
-    out = evaluate(state, ARTICLE, ARTICLE, META)
+    out = evaluate(state, ARTICLE, ARTICLE, META, G2P)
     assert out.action == "hold" and any("no recording" in r for r in out.reasons)
 
 
@@ -141,21 +144,21 @@ ISSUE = {"kind": "pacing", "where": "1:10", "note": "rushed"}
 
 
 def test_evaluate_publishes_when_every_claim_holds():
-    out = evaluate(_state(), ARTICLE, ARTICLE, META)
+    out = evaluate(_state(), ARTICLE, ARTICLE, META, G2P)
     assert (out.action, out.outcome, out.reasons) == ("publish", "clean", [])
 
 
 def test_evaluate_holds_when_the_prepared_text_is_not_what_was_recorded():
     paced = ARTICLE.replace("lonely.", "lonely...")  # passes the word check; not what was recorded
-    out = evaluate(_state(), ARTICLE, paced, META)
+    out = evaluate(_state(), ARTICLE, paced, META, G2P)
     assert out.action == "hold" and any("changed" in r for r in out.reasons)
-    out = evaluate(_state(recorded_sha256=None), ARTICLE, ARTICLE, META)
+    out = evaluate(_state(recorded_sha256=None), ARTICLE, ARTICLE, META, G2P)
     assert out.action == "hold" and any("changed" in r for r in out.reasons)
 
 
 def test_evaluate_holds_when_nothing_was_recorded():
     out = evaluate(_state(records=0, recorded_round=None, recorded_sha256=None, checks=[]),
-                   ARTICLE, ARTICLE, META)
+                   ARTICLE, ARTICLE, META, G2P)
     assert out.action == "hold" and any("nothing was recorded" in r for r in out.reasons)
 
 
@@ -168,7 +171,7 @@ def test_evaluate_holds_when_nothing_was_recorded():
     {"records": 2, "recorded_round": 2, "checks_used": 4},
 ])
 def test_evaluate_holds_without_a_successful_check_of_the_latest_round(changes):
-    out = evaluate(_state(**changes), ARTICLE, ARTICLE, META)
+    out = evaluate(_state(**changes), ARTICLE, ARTICLE, META, G2P)
     assert out.action == "hold" and any("no check" in r for r in out.reasons)
 
 
@@ -176,7 +179,7 @@ def test_evaluate_holds_without_a_successful_check_of_the_latest_round(changes):
 def test_evaluate_holds_on_precheck_warnings_for_clean_and_minor(outcome, issues):
     warned = [{"n": 1, "record": 1, "warnings": ["0:07 of silence at 3:10"]}]
     finish = {"outcome": outcome, "remaining_issues": issues, "substitutions": []}
-    out = evaluate(_state(checks=warned, finish=finish), ARTICLE, ARTICLE, META)
+    out = evaluate(_state(checks=warned, finish=finish), ARTICLE, ARTICLE, META, G2P)
     assert out.action == "hold" and any("0:07 of silence at 3:10" in r for r in out.reasons)
 
 
@@ -184,16 +187,16 @@ def test_only_the_latest_rounds_latest_check_counts():
     checks = [{"n": 1, "record": 1, "warnings": ["cut short"]},
               {"n": 2, "record": 2, "warnings": []}]
     out = evaluate(_state(records=2, recorded_round=2, checks_used=2, checks=checks),
-                   ARTICLE, ARTICLE, META)
+                   ARTICLE, ARTICLE, META, G2P)
     assert out.action == "publish"
     checks = [{"n": 1, "record": 1, "warnings": []}, {"n": 2, "record": 1, "warnings": ["cut"]}]
-    out = evaluate(_state(checks_used=2, checks=checks), ARTICLE, ARTICLE, META)
+    out = evaluate(_state(checks_used=2, checks=checks), ARTICLE, ARTICLE, META, G2P)
     assert out.action == "hold"
 
 
 def test_evaluate_holds_when_the_words_differ():
     edited = ARTICLE.replace("may end", "will end")
-    out = evaluate(_state(recorded_sha256=_sha(edited)), ARTICLE, edited, META)
+    out = evaluate(_state(recorded_sha256=_sha(edited)), ARTICLE, edited, META, G2P)
     assert out.action == "hold"
     assert any("may" in r and "will" in r for r in out.reasons)
 
@@ -216,7 +219,7 @@ RESPELLING = {"original": "Pengelley", "spoken": "Penjelly", "why": "pronunciati
 def named(tmp_path):
     store = WorkItemStore(tmp_path)
     conv = FakeConverter()
-    runner = RunnerTools(store, conv)
+    runner = RunnerTools(store, conv, FakeG2P())
     tools = AgentTools(store, FakeTTS(), FakeVerifier(), FakeG2P())
     opened = runner.open(NAMED, META)
     return store, runner, tools, conv, opened["item_id"]
@@ -340,7 +343,7 @@ class BrokenConverter(FakeConverter):
 
 def test_a_failed_conversion_leaves_no_mp3_and_can_be_retried(tmp_path):
     store, conv = WorkItemStore(tmp_path), BrokenConverter()
-    runner = RunnerTools(store, conv)
+    runner = RunnerTools(store, conv, FakeG2P())
     tools = AgentTools(store, FakeTTS(), FakeVerifier(), FakeG2P())
     item = runner.open(ARTICLE, META)["item_id"]
     tools.record(item); tools.check(item); tools.finish(item, "clean", [], [])
@@ -380,6 +383,156 @@ def test_a_hold_makes_no_mp3(env):
     {"outcome": "clean"},
 ])
 def test_a_malformed_finish_record_is_held_and_never_reaches_the_notes(finish):
-    out = evaluate(_state(finish=finish), ARTICLE, ARTICLE, META)
+    out = evaluate(_state(finish=finish), ARTICLE, ARTICLE, META, G2P)
     assert out.action == "hold" and out.reasons
     assert out.notes == "Zoning made us lonely.\nRecorded automatically."
+
+
+# ---- R3: what the engine would say, compared through its own G2P ----
+class SignG2P(FakeG2P):
+    """FakeG2P that voices a minus where misaki does and the word check doesn't: a "-"
+    before a digit, also after dots ("..-5") or with a quote before the digit ("-‘5")."""
+    def phonemes_for_text(self, text):
+        return super().phonemes_for_text(re.sub(r"-[‘']?(?=\d)", " minus ", text))
+
+
+class CountingG2P(FakeG2P):
+    def __init__(self):
+        self.calls = 0
+
+    def phonemes_for_text(self, text):
+        self.calls += 1
+        return super().phonemes_for_text(text)
+
+
+class BrokenG2P(FakeG2P):
+    def phonemes_for_text(self, text):
+        raise RuntimeError("the speech comparison failed: espeak is missing")
+
+
+COSTS = "Costs fell 5% today.\n\nThe Court may end it."
+HOLE = COSTS.replace("fell 5%", "fell ..-5%")  # the word check reads "5%"; misaki says "minus"
+
+
+def test_identical_speech_passes():
+    assert speech_matches(G2P, ARTICLE, ARTICLE, []) == []
+
+
+def test_pacing_punctuation_passes():
+    paced = ("Zoning, made us... lonely!\n\n[BREAK]\n\nThe Court -- may\n\nend it;")
+    assert check(ARTICLE, paced, []) == []
+    assert speech_matches(G2P, ARTICLE, paced, []) == []
+
+
+def test_a_declared_substitution_passes_and_an_undeclared_word_fails():
+    article = "Pope Leo XIV met the family."
+    prepared = "Pope Leo the Fourteenth met the family."
+    assert speech_matches(G2P, article, prepared, [Substitution("XIV", "the Fourteenth")]) == []
+    problems = speech_matches(G2P, article, prepared, [])
+    assert problems == ["the prepared text does not align with the article (the word check "
+                        "says where), so what the engine would say could not be compared with "
+                        "the article"]
+    problems = speech_matches(G2P, ARTICLE, ARTICLE + " Buy now.", [])
+    assert len(problems) == 1 and "does not align" in problems[0]
+
+
+class MisplacingG2P(FakeG2P):
+    """FakeG2P that, as misaki does, puts an override glued after "word(" on that word."""
+    def phonemes_for_text(self, text):
+        return super().phonemes_for_text(
+            re.sub(r"(\w+)\(\[([^\]]+)\]\(/([^)]*)/\)", r"[\1](/\3/)(\2", text))
+
+
+def test_an_override_is_compared_by_its_phonemes_where_the_engine_puts_them():
+    assert G2P.phonemes_for_text("The [cat](/kˈæt/) sat.") == "the kˈæt sat"
+    assert speech_matches(G2P, "The cat sat.", "The [cat](/kˈæt/) sat.", []) == []
+    # The article's side has the override free-standing, around its word; the engine
+    # would read the prepared text's on the word before: the phonemes moved.
+    article = "He said(Lawler) left."
+    prepared = "He said([Lawler](/lˈɔlɚ/)) left."
+    assert check(article, prepared, []) == []
+    assert speech_matches(G2P, article, prepared, []) == []
+    problems = speech_matches(MisplacingG2P(), article, prepared, [])
+    assert len(problems) == 1 and "'he lˈɔlɚ lawler left'" in problems[0]
+    assert "'he said lˈɔlɚ left'" in problems[0]
+
+
+def test_an_override_that_is_part_of_a_longer_word_cannot_be_compared():
+    problems = speech_matches(G2P, "Dr. Pengelley met.", "[Dr](/dˈɑktɚ/). Pengelley met.", [])
+    assert check("Dr. Pengelley met.", "[Dr](/dˈɑktɚ/). Pengelley met.", []) == []
+    assert len(problems) == 1 and "'[Dr](/dˈɑktɚ/)' is not one whole word" in problems[0]
+    assert "word check" not in problems[0]
+
+
+def test_a_sign_the_word_check_misses_fails_and_the_message_shows_where():
+    assert check(COSTS, HOLE, []) == []  # the parked hole
+    problems = speech_matches(SignG2P(), COSTS, HOLE, [])
+    assert len(problems) == 1
+    assert "line 1 of the article" in problems[0] and "'Costs fell 5% today.'" in problems[0]
+    assert "minus" in problems[0]  # the prepared side's phonemes around the difference
+    assert speech_matches(SignG2P(), COSTS, COSTS.replace("today", "-- today"), []) == []
+
+
+def test_the_message_names_the_line_of_the_difference():
+    article = "One line here.\n\nCosts fell 5% today, and the rest of a long line goes on."
+    problems = speech_matches(SignG2P(), article, article.replace("5%", "..-5%"), [])
+    assert "line 2 of the article" in problems[0]
+    assert "beginning 'Costs fell 5% today, and the rest of'" in problems[0]
+
+
+def test_evaluate_holds_when_the_engine_would_say_something_else():
+    out = evaluate(_state(recorded_sha256=_sha(HOLE)), COSTS, HOLE, META, SignG2P())
+    assert out.action == "hold" and any("minus" in r for r in out.reasons)
+    out = evaluate(_state(recorded_sha256=_sha(HOLE)), COSTS, HOLE, META, G2P)
+    assert out.action == "publish"  # FakeG2P reads no sign: the comparison decided
+
+
+def test_evaluate_holds_when_the_comparison_cannot_run():
+    out = evaluate(_state(), ARTICLE, ARTICLE, META, BrokenG2P())
+    assert out.action == "hold"
+    assert any("could not run" in r and "espeak is missing" in r for r in out.reasons)
+
+
+def test_the_comparison_runs_only_when_everything_else_holds():
+    counting = CountingG2P()
+    evaluate(_state(), ARTICLE, ARTICLE, META, counting)
+    assert counting.calls == 2  # the prepared text, and the article with its substitutions
+    held = {"outcome": "hold", "remaining_issues": [ISSUE], "substitutions": []}
+    for state in (_state(finish=held), _state(records=2, recorded_round=1)):
+        counting.calls = 0
+        assert evaluate(state, ARTICLE, ARTICLE, META, counting).action == "hold"
+        assert counting.calls == 0
+
+
+def test_finalize_runs_the_comparison_with_the_runners_g2p(tmp_path):
+    store, conv = WorkItemStore(tmp_path), FakeConverter()
+    runner = RunnerTools(store, conv, SignG2P())
+    tools = AgentTools(store, FakeTTS(), FakeVerifier(), FakeG2P())  # reads no sign
+    item = runner.open(COSTS, META)["item_id"]
+    tools.replace_text(item, "fell 5%", "fell ..-5%")
+    tools.record(item); tools.check(item); tools.finish(item, "clean", [], [])
+    out = runner.finalize(item)
+    assert out["action"] == "hold" and conv.calls == []
+
+
+def test_misaki_hears_a_sign_the_word_check_misses():
+    # Runs only where misaki is installed (not in the light test environment).
+    pytest.importorskip("misaki")
+    from narration.engines import MisakiG2P
+    g2p = MisakiG2P()
+    source = "Costs fell 5% today."
+    assert speech_matches(g2p, source, "Costs fell(-5%) today.", [])
+    assert speech_matches(g2p, source, "Costs fell 5% -- today.", []) == []  # a pause
+    for hole in ("Costs fell ..-5% today.", "Costs fell -‘5% today."):
+        assert check(source, hole, []) == []  # the word check reads "5%" ...
+        problems = speech_matches(g2p, source, hole, [])
+        assert problems and "mˈInəs" in problems[0]  # ... the engine says "minus"
+    # overrides read in place pass, free-standing on the article's side or not ...
+    named = "We met Pengelley, then Ocasio-Cortez and Jean-Luc."
+    prepared = "We met [Pengelley](/pɛnʤˈɛli/), then Ocasio-[Cortez](/kɔɹtˈɛz/) and Jean-[Luc](/lˈuk/)."
+    assert speech_matches(g2p, named, prepared, []) == []
+    # ... and one misaki puts on the wrong word fails: here it loses "left"
+    article = "He said(Lawler) that Pengelley left."
+    prepared = "He said([Lawler](/lˈɔlɚ/)) that [Pengelley](/pɛnʤˈɛli/) left."
+    assert check(article, prepared, []) == []
+    assert speech_matches(g2p, article, prepared, [])

@@ -204,3 +204,50 @@ def test_fake_tts_hold_gives_up_after_its_timeout(tmp_path):
 def test_fake_link_g2p_reads_link_syntax_like_misaki_preprocessing():
     assert FakeLinkG2P().phonemes("[Pengelley](/kˈɪlðəmˈɔl/)") == "kˈɪlðəmˈɔl"
     assert FakeLinkG2P().phonemes("Pengelley") == FakeG2P().phonemes("Pengelley")
+
+
+def test_misaki_g2p_reads_a_whole_text_line_by_line_with_preprocessing(monkeypatch):
+    run, state = _overlap_meter()
+    calls = []
+
+    class FakeMisakiG2P:
+        def __init__(self, **kwargs):
+            pass
+
+        def __call__(self, text, preprocess=True):
+            calls.append((text, preprocess))
+            run()
+            return f"<{text}>", []
+
+    monkeypatch.setitem(sys.modules, "misaki", types.SimpleNamespace(
+        en=types.SimpleNamespace(G2P=FakeMisakiG2P),
+        espeak=types.SimpleNamespace(EspeakFallback=lambda british: None)))
+    g2p = MisakiG2P()
+    # As the engine's pipeline splits it: the text stripped, split on runs of newlines,
+    # blank lines skipped; misaki's preprocessing on, so overrides are read as the engine reads them.
+    assert g2p.phonemes_for_text("\n one [x](/ɛks/)\n \n\ntwo, three\n") == (
+        "<one [x](/ɛks/)>\n<two, three>")
+    assert calls == [("one [x](/ɛks/)", True), ("two, three", True)]
+    _in_threads(lambda: g2p.phonemes_for_text("a\nb"))
+    assert state["most"] == 1  # one misaki call at a time, lookups included
+
+
+def test_misaki_g2p_reports_a_failed_comparison_as_a_runtime_error(monkeypatch):
+    class FailingMisakiG2P:
+        def __init__(self, **kwargs):
+            pass
+
+        def __call__(self, text, preprocess=True):
+            raise FileNotFoundError(2, "No such file or directory", "/opt/espeak/data")
+
+    monkeypatch.setitem(sys.modules, "misaki", types.SimpleNamespace(
+        en=types.SimpleNamespace(G2P=FailingMisakiG2P),
+        espeak=types.SimpleNamespace(EspeakFallback=lambda british: None)))
+    with pytest.raises(RuntimeError, match="the speech comparison failed") as failed:
+        MisakiG2P().phonemes_for_text("Costs fell.")
+    assert "/opt/espeak" not in str(failed.value)
+
+
+def test_fake_g2p_reads_words_and_overrides_line_by_line():
+    text = "The Court, [Pengelley](/pɛnʤˈɛli/) -- it's 5%!\n\n[x](//ɛks//) Next  line.\n"
+    assert FakeG2P().phonemes_for_text(text) == "the court pɛnʤˈɛli it's 5\nɛks next line"

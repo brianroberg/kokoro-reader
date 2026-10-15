@@ -2,8 +2,9 @@
 
 The prepared text must say exactly what the article says. Formatting,
 paragraph breaks, pauses and [BREAK] markers are invisible here. The server's
-gate additionally compares the engine's own phoneme output (Task 5); this
-module is the fast, explainable pre-check.
+gate and finish additionally compare the engine's own phoneme output
+(gate.speech_matches, over apply() below); this module is the fast, explainable
+pre-check.
 
 Both texts are read as the engine receives them: text_to_speech.clean_markdown_text
 (the cleaning the CLI and KokoroEngine apply), then every run of whitespace other
@@ -111,7 +112,7 @@ import re
 from dataclasses import dataclass
 from typing import NamedTuple
 
-from text_to_speech import clean_markdown_text, prepare_for_tts
+from text_to_speech import clean_markdown_text, prepare_for_tts, split_sections
 
 MAX_SUBSTITUTIONS = 25
 MAX_SPOKEN_WORDS = 6         # per declaration
@@ -165,6 +166,8 @@ _AFTER_OVERRIDE = frozenset(".,;:!?)]}\"”’'")
 _WORD_CHAR = re.compile(r"[^\W_]")
 _DIGIT_APOSTROPHE = re.compile(r"(?<=\d)'|'(?=\d)")
 _SPACES = re.compile(r"[^\S\n]+")
+_RUN = re.compile(r"\S+")  # str.split()'s runs: re's \s and str.isspace() agree on every character
+_LOOSE_SPACES = re.compile(r" *\n *| {2,}")
 
 
 @dataclass(frozen=True)
@@ -195,10 +198,27 @@ def normalize_spaces(text: str) -> str:
 _BREAK = "[BREAK]"
 
 
+def _engine_input(text: str) -> str:
+    """The text as generate_audio receives it from KokoroEngine, after its own
+    prepare_for_tts: [BREAK] markers still in it."""
+    return prepare_for_tts(normalize_spaces(clean_markdown_text(text)))
+
+
+def engine_text(text: str) -> str:
+    """The text as the engine's grapheme-to-phoneme step reads it: KokoroEngine's and
+    generate_audio's preparation, then one line per [BREAK] section (split_sections),
+    since the engine reads each section on its own, as it reads each line."""
+    return "\n".join(split_sections(_engine_input(text)))
+
+
+def _straight(text: str) -> str:
+    """Curly apostrophes read as straight ones, as misaki reads them (same length)."""
+    return text.replace("’", "'").replace("‘", "'")
+
+
 def _with_breaks(text: str) -> str:
     """The text as the engine receives it, curly apostrophes read as straight ones."""
-    text = prepare_for_tts(normalize_spaces(clean_markdown_text(text)))
-    return text.replace("’", "'").replace("‘", "'")
+    return _straight(_engine_input(text))
 
 
 def _spoken_text(text: str) -> str:
@@ -236,37 +256,45 @@ def _sign_belongs(run: str, start: int) -> bool:
     return start == 0 or (run[start - 1] not in "-." and not _is_word_char(run, start - 1))
 
 
-def _run_tokens(run: str) -> list[str]:
-    """The tokens of one run of non-whitespace characters."""
-    tokens, pos = [], 0
+def _run_spans(run: str) -> list[tuple[int, int]]:
+    """Where each token of one run of non-whitespace characters starts and ends."""
+    spans, pos = [], 0
     while pos < len(run):
         for sign in _SIGNS:
             number = _NUMBER.match(run, pos + len(sign)) if run.startswith(sign, pos) else None
             if number and _sign_belongs(run, pos):
-                tokens.append(sign + number.group())
+                spans.append((pos, number.end()))
                 pos = number.end()
                 break
         else:
             token = _TOKEN.match(run, pos)
-            tokens.append(token.group())
+            spans.append((pos, token.end()))
             pos = token.end()
-    return tokens
+    return spans
+
+
+def _token_spans(text: str) -> list[tuple[str, str, int, int]]:
+    """Case-folded tokens of already-cleaned text, silent punctuation dropped, each
+    as (token, how a message shows it, start, end), text[start:end] being what it
+    was read from. An apostrophe next to a digit goes, as misaki drops it ("5'6" says
+    "fifty-six"). A run with a symbol in it is one token (_merge), shown as written,
+    so a message can show the spacing that differs, and spanning the run from its
+    first token to its last (silent marks around them are not part of it)."""
+    out = []
+    for m in _RUN.finditer(text):
+        run, at = m.group(), m.start()
+        kept = [(a, b) for a, b in _run_spans(run) if run[a:b] not in SILENT]
+        tokens = [_DIGIT_APOSTROPHE.sub("", run[a:b]).casefold() for a, b in kept]
+        if any(_is_symbol(ch) for ch in run):
+            out.append((_merge(tokens), run.casefold(), at + kept[0][0], at + kept[-1][1]))
+        else:
+            out.extend((tok, tok, at + a, at + b) for tok, (a, b) in zip(tokens, kept))
+    return out
 
 
 def _tokens_shown(text: str) -> list[tuple[str, str]]:
-    """Case-folded tokens of already-cleaned text, silent punctuation dropped, each
-    with how a message shows it. An apostrophe next to a digit goes, as misaki drops
-    it ("5'6" says "fifty-six"). A run with a symbol in it is one token (_merge),
-    shown as written, so a message can show the spacing that differs."""
-    out = []
-    for run in text.split():
-        tokens = [_DIGIT_APOSTROPHE.sub("", tok).casefold()
-                  for tok in _run_tokens(run) if tok not in SILENT]
-        if any(_is_symbol(ch) for ch in run):
-            out.append((_merge(tokens), run.casefold()))
-        else:
-            out.extend((tok, tok) for tok in tokens)
-    return out
+    """_token_spans without the positions."""
+    return [(tok, shown) for tok, shown, _, _ in _token_spans(text)]
 
 
 def _tokens(text: str) -> list[str]:
@@ -353,10 +381,118 @@ def audit(source: str, prepared: str,
                            "(too many alternatives)"], {}
     if isinstance(aligned, _Stuck):
         return problems + [_describe(src, prep, pairs, aligned, (src_shown, prep_shown))], {}
+    applied = [0] * len(pairs)
+    for _, _, k in aligned:
+        if k is not None:
+            applied[k] += 1
     counts: dict[Substitution, int] = {}
-    for s, n in zip(substitutions, aligned):
+    for s, n in zip(substitutions, applied):
         counts[s] = counts.get(s, 0) + n
-    return problems + _check_budgets(src, substitutions, pairs, aligned), counts
+    return problems + _check_budgets(src, substitutions, pairs, applied), counts
+
+
+def apply(source: str, prepared: str, substitutions: list[Substitution]) -> str | None:
+    """The article as the engine reads it (engine_text's preparation), rewritten to say
+    what the prepared text claims to say: each declared substitution applied where
+    audit's alignment applied it, and each phonetic override of the prepared text put
+    around the article's word it stands for, free-standing ("[word](/phonemes/)" with a
+    space on each side), so misaki reads it in place. Everything else is the article's:
+    its punctuation, its paragraphs, and an override the article itself has, read as
+    its displayed text, as words() reads it. None when the texts don't align (check()
+    then reports why), or an override doesn't stand for exactly one whole word
+    (apply_with_reason says which).
+
+    gate.speech_matches compares what the engine says for this and for the prepared
+    text. The prepared text's pacing (commas, "--", [BREAK]s) doesn't travel, so a
+    sign or a mark that the word check counts as silent but misaki voices shows up as
+    a difference."""
+    return apply_with_reason(source, prepared, substitutions)[0]
+
+
+def apply_with_reason(source: str, prepared: str,
+                      substitutions: list[Substitution]) -> tuple[str | None, str]:
+    """apply()'s text, or None and why."""
+    unaligned = None, "the prepared text does not align with the article"
+    if len(prepared) > max_prepared_length(len(source)) or len(substitutions) > MAX_SUBSTITUTIONS:
+        return unaligned
+    base = _without_overrides(_engine_input(source))[0]
+    src_spans = _token_spans(_straight(base))
+    reduced, placed = _without_overrides(_spoken_text(prepared))
+    prep_spans = _token_spans(reduced)
+    src = [tok for tok, *_ in src_spans]
+    if (len(prep_spans) > len(src) + added_words_limit(len(src))
+            or _check_substitutions(src, substitutions)):
+        return unaligned
+    pairs = [(tuple(words(s.original)), tuple(words(s.spoken))) for s in substitutions]
+    steps = _align(src, [tok for tok, *_ in prep_spans], pairs)
+    if not isinstance(steps, list):
+        return unaligned
+    override_at = _override_tokens(prep_spans, placed)
+    if isinstance(override_at, str):
+        return None, (f"the override {override_at!r} is not one whole word as the engine "
+                      "reads the text (a mark glued to it, such as the dot of '[Dr](/…/).', "
+                      "makes it part of a longer word), so the engine may put it on "
+                      "another word; make the override cover the whole word")
+    pieces, pos = [], 0
+    for i, j, k in steps:
+        if k is None:
+            start, end = src_spans[i][2:]
+            text = f" {override_at[j]} " if j in override_at else base[start:end]
+        else:
+            original, spoken = pairs[k]
+            start, end = src_spans[i][2], src_spans[i + len(original) - 1][3]
+            text = _with_overrides(substitutions[k].spoken,
+                                   [override_at.get(j + q) for q in range(len(spoken))])
+        pieces += [base[pos:start], text]
+        pos = end
+    pieces.append(base[pos:])
+    return _LOOSE_SPACES.sub(lambda m: "\n" if "\n" in m.group() else " ",
+                             "".join(pieces)).strip(), ""
+
+
+def _without_overrides(text: str) -> tuple[str, list[tuple[int, int, str]]]:
+    """_PHONETIC.sub(r"\1", text) (each override read as its displayed text), and
+    where each override's display lies in the result, with the override as written.
+    [BREAK] markers become line breaks first (the engine splits there; the tokens are
+    the same as with the space _spoken_text leaves)."""
+    text = text.replace(_BREAK, "\n" * len(_BREAK))
+    pieces, placed, pos, length = [], [], 0, 0
+    for m in _PHONETIC.finditer(text):
+        length += m.start() - pos
+        placed.append((length, length + len(m.group(1)), m.group(0)))
+        pieces += [text[pos:m.start()], m.group(1)]
+        length += len(m.group(1))
+        pos = m.end()
+    pieces.append(text[pos:])
+    return "".join(pieces), placed
+
+
+def _override_tokens(spans, placed) -> dict[int, str] | str:
+    """The token each override's display is, as {token index: override}; or the first
+    override whose display is not exactly one whole token (a part of a longer one, or
+    none)."""
+    starts = [start for _, _, start, _ in spans]
+    found = {}
+    for start, end, written in placed:
+        j = bisect.bisect_left(starts, start)
+        if (j == len(spans) or spans[j][3] > end or (j + 1 < len(spans) and spans[j + 1][2] < end)
+                or (j and spans[j - 1][3] > start)):
+            return written
+        found[j] = written
+    return found
+
+
+def _with_overrides(spoken: str, wanted: list[str | None]) -> str:
+    """A substitution's spoken text as the engine reads it, with the override wanted
+    on each of its words, if any, put around that word free-standing."""
+    text = _without_overrides(_engine_input(spoken))[0]
+    pieces, pos = [], 0
+    for (_, _, start, end), override in zip(_token_spans(_straight(text)), wanted):
+        if override:
+            pieces += [text[pos:start], f" {override} "]
+            pos = end
+    pieces.append(text[pos:])
+    return "".join(pieces)
 
 
 def _stands_alone(spoken: str, start: int, end: int) -> bool:
@@ -571,9 +707,11 @@ class _Stuck(NamedTuple):
 
 def _align(src, prep, pairs):
     """Align prep to src: prep must be src with some occurrences of each pair's
-    original replaced by its spoken form. Returns how many occurrences each pair
-    is applied to, for the alignment that adds the fewest words; a _Stuck if
-    there is none; None if the search grows past a bound instead of running away.
+    original replaced by its spoken form. Returns the steps of the alignment that
+    adds the fewest words, in order, each as (i, j, k): src[i] and prep[j] are the
+    same word (k is None), or pair k's original starts at src[i] and its spoken
+    form at prep[j]. A _Stuck if there is no alignment; None if the search grows
+    past a bound instead of running away.
 
     Explores all alternatives (prefix-sharing pairs need it). Every step moves
     forward in both texts, so settling states in (i, j) order settles each one
@@ -602,12 +740,11 @@ def _align(src, prep, pairs):
         if len(done) > limit:
             return None
         if i == n and j == m:
-            counts, state = [0] * len(pairs), (n, m)
+            steps, state = [], (n, m)
             while state != (0, 0):
                 _, state, k = best[state]
-                if k is not None:
-                    counts[k] += 1
-            return counts
+                steps.append((*state, k))
+            return steps[::-1]
         furthest = max(furthest, (i, j))
         cost = best[(i, j)][0]
         steps = []

@@ -1084,3 +1084,121 @@ def test_a_break_marker_beside_an_override_is_fine():
     article = "We saw x today. Then y."
     assert check(article, "We saw [x](/ˈɛks/)\n\n[BREAK]\n\ntoday. Then [y](/wˈI/).", []) == []
     assert check(article, "We saw [BREAK] [x](/ˈɛks/) today.[BREAK]Then [y](/wˈI/).", []) == []
+
+
+# ---- apply: the article with the declared substitutions and the prepared overrides ----
+FOURTEENTH = Substitution("XIV", "the Fourteenth")
+
+
+@pytest.mark.parametrize("source, prepared, subs, expected", [
+    # a substitution at the start, in the middle and at the end
+    ("XIV met the family.", "The Fourteenth met the family.",
+     [Substitution("XIV", "The Fourteenth")], "The Fourteenth met the family."),
+    ("Pope Leo XIV met the family.", "Pope Leo the Fourteenth met the family.",
+     [FOURTEENTH], "Pope Leo the Fourteenth met the family."),
+    ("They met Leo XIV.", "They met Leo the Fourteenth.", [FOURTEENTH],
+     "They met Leo the Fourteenth."),
+    # applied where the alignment applied it, and only there
+    ("Leo XIV met Leo XIV.", "Leo XIV met Leo the Fourteenth.", [FOURTEENTH],
+     "Leo XIV met Leo the Fourteenth."),
+    # substitutions that share a prefix
+    ("Pope Leo XIV met Leo.", "Pope Leo the Fourteenth met Leon.",
+     [Substitution("Leo", "Leon"), Substitution("Leo XIV", "Leo the Fourteenth")],
+     "Pope Leo the Fourteenth met Leon."),
+    ("Pope Leo XIV met.", "Pope Leo the Fourteenth met.",
+     [Substitution("Pope Leo XIV", "Pope Leo the Fourteenth")], "Pope Leo the Fourteenth met."),
+    # the article's own punctuation stays; the prepared text's pacing does not travel
+    ("Pope Leo XIV, then (XIV).", "Pope Leo the Fourteenth -- then (the Fourteenth)...",
+     [FOURTEENTH], "Pope Leo the Fourteenth, then (the Fourteenth)."),
+])
+def test_apply_puts_each_substitution_where_the_alignment_used_it(source, prepared, subs, expected):
+    from narration.words import apply
+    assert apply(source, prepared, subs) == expected
+
+
+@pytest.mark.parametrize("source, prepared, expected", [
+    # each override free-standing, around the article's word: misaki then reads it in place
+    ("We met Pengelley, then (Lawler) left.",
+     "We met [Pengelley](/pɛnʤˈɛli/), then ([Lawler](/lˈɔlɚ/)) left.",
+     "We met [Pengelley](/pɛnʤˈɛli/) , then ( [Lawler](/lˈɔlɚ/) ) left."),
+    ('"Pengelley" spoke.', '"[Pengelley](/pɛnʤˈɛli/)" spoke.',
+     '" [Pengelley](/pɛnʤˈɛli/) " spoke.'),
+    ("Ocasio-Cortez spoke.", "Ocasio-[Cortez](/kɔɹtˈɛz/) spoke.",
+     "Ocasio- [Cortez](/kɔɹtˈɛz/) spoke."),
+    ("Pengelley’s dog.", "[Pengelley’s](/pɛnʤˈɛliz/) dog.", "[Pengelley's](/pɛnʤˈɛliz/) dog."),
+    # the prepared text's paragraphs and [BREAK]s don't travel either
+    ("We met Pengelley today.", "We met\n\n[BREAK]\n\n[Pengelley](/pɛnʤˈɛli/) today.",
+     "We met [Pengelley](/pɛnʤˈɛli/) today."),
+])
+def test_apply_inserts_each_override_free_standing_around_its_word(source, prepared, expected):
+    from narration.words import apply
+    assert apply(source, prepared, []) == expected
+
+
+def test_apply_puts_an_override_on_a_substituted_word():
+    from narration.words import apply
+    prepared = "Pope Leo the [Fourteenth](/fɔɹtˈinθ/) met."
+    assert apply("Pope Leo XIV met.", prepared, [FOURTEENTH]) == (
+        "Pope Leo the [Fourteenth](/fɔɹtˈinθ/) met.")
+
+
+def test_apply_reads_the_article_as_the_engine_does():
+    from narration.words import apply
+    # markup goes, "--" is a pause, curly apostrophes stay, and an override the article
+    # itself has (a relative link) is read as its displayed text, as words() reads it
+    source = "# Zoning\n\nIt’s **here** -- see [Home](/home/) today.\n\nPope Leo XIV spoke."
+    prepared = "Zoning\n\nIt’s here -- see Home today.\n\nPope Leo the Fourteenth spoke."
+    assert apply(source, prepared, [FOURTEENTH]) == (
+        "Zoning\n\nIt’s here... see Home today.\n\nPope Leo the Fourteenth spoke.")
+
+
+@pytest.mark.parametrize("source, prepared, subs", [
+    ("The cat sat.", "The cat sat down.", []),                   # an undeclared word
+    ("The cat sat.", "The dog sat.", []),
+    ("The cat sat.", "The cat sat.", [Substitution("absent", "x")]),  # not in the article
+    ("We met Pengelley family.", "We met Pengel[ley](/lˈA/) family.", []),  # part of a word
+    ("x", "x " * 30, []),                                        # more words than allowed
+])
+def test_apply_is_none_when_the_texts_do_not_align(source, prepared, subs):
+    from narration.words import apply
+    assert apply(source, prepared, subs) is None
+
+
+def test_engine_text_is_what_the_engine_reads_one_section_per_line():
+    from narration.words import engine_text
+    text = "# Head\n\nIt  went **well** -- mostly.\n\n[BREAK]\n\nThen [x](/ɛks/)."
+    assert engine_text(text) == "Head\n\nIt went well... mostly.\nThen [x](/ɛks/)."
+
+
+@settings(max_examples=300)
+@given(st.text(alphabet=st.sampled_from(list("ab5$%.-'’(),[]/ \n\t ")), max_size=40))
+def test_property_token_spans_read_the_tokens_check_reads(text):
+    from narration.words import _token_spans, _tokens
+    spans = _token_spans(text)
+    assert [tok for tok, *_ in spans] == _tokens(text)
+    assert all(text[a:b].strip() == text[a:b] and text[a:b] for *_, a, b in spans)
+
+
+@settings(max_examples=300)
+@given(st.data(), paragraphs)
+def test_property_apply_says_what_the_prepared_text_says(data, paras):
+    # The same generated edits as test_property_allowed_edits_and_declared_substitutions_pass:
+    # the applied article has the prepared text's words and overrides, in order.
+    from narration.words import apply, overrides
+    present = sorted({w for p in paras for w in p if w not in SAME})
+    chosen = (data.draw(st.lists(st.sampled_from(present), unique=True, max_size=3))
+              if present else [])
+    subs = [Substitution(w, " ".join(data.draw(st.lists(st.sampled_from(SPOKEN), min_size=1,
+                                                        max_size=3)))) for w in chosen]
+    mapping = {s.original: s.spoken for s in subs}
+    replaced = [[(mapping[w] if w in mapping and data.draw(st.booleans()) else w) for w in p]
+                for p in paras]
+    replaced = [" ".join(p).split() for p in replaced]
+    prepared = data.draw(formatted(replaced))
+    source = render(paras)
+    if check(source, prepared, subs):
+        return  # over a budget: the check refuses it, and apply is never asked
+    applied = apply(source, prepared, subs)
+    assert applied is not None
+    assert words(applied) == words(prepared)
+    assert overrides(applied) == overrides(prepared)

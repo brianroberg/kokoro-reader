@@ -8,6 +8,7 @@ layer shows those to the agent) and keep server paths out of its message.
 """
 from __future__ import annotations
 
+import re
 import threading
 from pathlib import Path
 from typing import Protocol
@@ -29,6 +30,13 @@ class Verifier(Protocol):
 
 class G2P(Protocol):
     def phonemes(self, word: str) -> str: ...
+
+    def phonemes_for_text(self, text: str) -> str:
+        """What the engine says for a whole text: read line by line as the engine's
+        pipeline splits it (the text stripped, split on runs of newlines, blank lines
+        skipped), override syntax read as the engine reads it; one line of phonemes
+        per line read, joined with newlines."""
+        ...
 
 
 class Converter(Protocol):
@@ -103,6 +111,23 @@ class MisakiG2P:
         except OSError as e:
             raise _failed("the pronunciation lookup", e) from e
         return out[0] if isinstance(out, tuple) else str(out)
+
+    def phonemes_for_text(self, text):
+        # As mlx_audio's Kokoro pipeline reads its input (split_pattern r"\n+"), with
+        # misaki's preprocessing on, as the engine has it: here "[word](/phonemes/)"
+        # is the engine's own override syntax, read as the engine reads it. One line
+        # per lock, so lookups from other sessions aren't held up for a whole article.
+        out = []
+        for line in re.split(r"\n+", text.strip()):
+            if not line.strip():
+                continue
+            try:
+                with _G2P_LOCK:
+                    result = self._g2p(line)
+            except OSError as e:
+                raise _failed("the speech comparison", e) from e
+            out.append(result[0] if isinstance(result, tuple) else str(result))
+        return "\n".join(out)
 
 
 class Mp3Converter:

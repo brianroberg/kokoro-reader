@@ -10,8 +10,9 @@ from narration.gate import album_for, evaluate
 
 
 class RunnerTools:
-    def __init__(self, store, converter):
-        self.store, self.converter = store, converter
+    def __init__(self, store, converter, g2p):
+        # g2p: the engine's grapheme-to-phoneme adapter, for the gate's speech comparison.
+        self.store, self.converter, self.g2p = store, converter, g2p
 
     def open(self, article_text: str, metadata: dict) -> dict:
         if not isinstance(article_text, str) or not article_text.strip():
@@ -50,7 +51,7 @@ class RunnerTools:
             self.store.revoke(item_id)
             meta = json.loads(self.store.read_text(item_id, "metadata.json"))
             result = evaluate(state, self.store.read_text(item_id, "source.md"),
-                              self.store.read_text(item_id, "prepared.md"), meta)
+                              self.store.read_text(item_id, "prepared.md"), meta, self.g2p)
             mp3 = self.store.path(item_id, "episode.mp3")
             if result.action == "publish" and not mp3.exists():
                 self._convert(item_id, mp3, meta)

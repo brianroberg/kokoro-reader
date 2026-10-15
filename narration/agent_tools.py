@@ -25,7 +25,9 @@ held is published.
 validate_finish (the shapes of a finish call) and validate_substitutions (what its
 substitutions must satisfy) are module functions because the gate runs them again
 on the stored finish record: one implementation, so the gate can't refuse what
-finish accepted, nor the other way round."""
+finish accepted, nor the other way round. For the same reason finish runs the gate's
+speech comparison (gate.speech_matches) for outcome clean or minor, so a session
+learns before finalize that the engine would say something the article doesn't."""
 from __future__ import annotations
 
 import functools
@@ -348,9 +350,10 @@ class AgentTools:
 
     def _check_claims(self, item_id, state, subs_in):
         """What outcome clean or minor claims: the latest round recorded the text as it
-        is now, a check of that round found no pre-check warnings, and the text says
-        what the article says with exactly the declared substitutions
-        (validate_substitutions, which the gate runs too)."""
+        is now, a check of that round found no pre-check warnings, the text says what
+        the article says with exactly the declared substitutions
+        (validate_substitutions), and the engine would say what it says for the
+        article with them (gate.speech_matches). The gate runs both again."""
         n = state["records"]
         hold = "finish with outcome 'hold'"
         if n == 0:
@@ -375,7 +378,17 @@ class AgentTools:
                       if n < MAX_RECORDS and _checks_used(state) < MAX_CHECKS
                       else "No record round or check is left to fix it: finish with outcome 'hold'.")
             raise ToolError(f"the latest check's pre-check flagged: {flagged}. {advice}")
-        validate_substitutions(state, self.store.read_text(item_id, "source.md"), prepared, subs_in)
+        source = self.store.read_text(item_id, "source.md")
+        validate_substitutions(state, source, prepared, subs_in)
+        # Imported here: the gate imports this module.
+        from narration.gate import speech_matches
+        subs = [Substitution(s["original"], s["spoken"]) for s in subs_in]
+        problems = speech_matches(self.g2p, source, prepared, subs)
+        if problems:
+            advice = ("Make the prepared text read as the article does there (or declare the "
+                      f"change in substitutions), then record and check again; or {hold}."
+                      if n < MAX_RECORDS else f"No record rounds are left to fix it: {hold}.")
+            raise ToolError(f"{problems[0]}. {advice}")
 
 
 def validate_finish(outcome, remaining_issues, substitutions) -> tuple[list[dict], list[dict]]:
