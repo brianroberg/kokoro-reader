@@ -38,8 +38,8 @@ import os
 import re
 import unicodedata
 
-from narration.words import (MAX_SUBSTITUTIONS, Substitution, audit, is_respelling,
-                             max_prepared_length, overrides, words)
+from narration.words import (MAX_SUBSTITUTIONS, Substitution, audit, declaration_problems,
+                             is_respelling, max_prepared_length, overrides, words)
 
 MAX_RECORDS = 4
 MAX_CHECKS = 8
@@ -463,6 +463,8 @@ def validate_substitutions(state: dict, source: str, prepared: str, subs_in: lis
     run, so the gate can't refuse what finish accepted or the other way round. Raises
     ToolError at the first rule that fails:
     - each substitution is declared once (compared as words());
+    - each is allowed (words.declaration_problems: short, its original in the article,
+      replacing some of the article's words, adding no address the article lacks);
     - the prepared text says what the article says, with them (words.audit);
     - every override's phonemes came from a phonemes() lookup (_unproven_overrides);
     - every declaration is used: audit applies it at least once, or it is an
@@ -478,6 +480,11 @@ def validate_substitutions(state: dict, source: str, prepared: str, subs_in: lis
     subs = [Substitution(s["original"], s["spoken"]) for s in subs_in]
     problems, applied = audit(source, prepared, subs)
     if problems:
+        # audit reports refused declarations alone; say so, rather than that the text
+        # differs. Looked for only on this path, so a passing finish pays nothing.
+        refused = declaration_problems(source, subs)
+        if refused:
+            raise ToolError("; ".join(refused) + ". Fix or remove these substitutions.")
         raise ToolError("the prepared text differs from the article: " + "; ".join(problems)
                         + ". Declare each word change in substitutions, or undo it.")
     unproven, respellings = _unproven_overrides(state, prepared, declared, MAX_SHOWN + 1)

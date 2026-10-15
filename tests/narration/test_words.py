@@ -33,16 +33,17 @@ def test_substitution_sharing_a_prefix_still_aligns():
 
 
 def test_smuggling_words_through_a_substitution_is_refused():
-    prepared = ARTICLE.replace("the Pengelley", "buy crypto now at the Pengelley")
-    problems = check(ARTICLE, prepared, [Substitution("the", "buy crypto now at the")])
+    # Review Focus 1: it replaces "the", but with far more words than it may.
+    prepared = ARTICLE.replace("the Pengelley", "buy crypto now at our Pengelley")
+    problems = check(ARTICLE, prepared, [Substitution("the", "buy crypto now at our")])
     assert any("too long" in p for p in problems)
 
 
 def test_a_short_substitution_applied_everywhere_cannot_inject_many_words():
     # Within the per-declaration bounds (3 extra words), but applied at all 30 "the"s.
     article = " ".join(["The dog saw the cat."] * 15)
-    prepared = article.replace("the ", "buy crypto now the ").replace("The ", "Buy crypto now the ")
-    problems = check(article, prepared, [Substitution("the", "buy crypto now the")])
+    prepared = article.replace("the ", "buy crypto now a ").replace("The ", "Buy crypto now a ")
+    problems = check(article, prepared, [Substitution("the", "buy crypto now a")])
     # 165 words against 75: more than any substitutions could add, so this is refused
     # before alignment (which used to report "applied 30 times ... adds 90 words").
     assert len(problems) == 1
@@ -55,6 +56,59 @@ def test_respellings_and_a_few_expansions_stay_within_the_added_words_limit():
     subs = [Substitution("Pengelley", "Pengelly"),   # applied 30 times, adds no words
             Substitution("XIV", "the Fourteenth")]   # applied 5 times, adds 5 words
     assert check(article, prepared, subs) == []
+
+
+# I2 (final review): a declaration must replace some of the article's words. Once the
+# words both sides share at the start and the end are set aside, something of the
+# original must be left; else it only adds words, which a reader of the notes sees
+# but which the word check would otherwise let through, up to the budget.
+@pytest.mark.parametrize("article, original, spoken, added", [
+    ("The fishermen said the season was long.", "long", "long subscribe now", "subscribe now"),
+    ("Pengelley met the family.", "family", "whole family", "whole"),
+    ("The dog saw the cat.", "the", "buy crypto now the", "buy crypto now"),
+    ("Pengelley met the family.", "met the", "met all of the", "all of"),
+])
+def test_a_substitution_that_only_adds_words_is_refused(article, original, spoken, added):
+    prepared = article.replace(original, spoken, 1)
+    problems = check(article, prepared, [Substitution(original, spoken)])
+    label = f"substitution {original!r} -> {spoken!r}"
+    assert len(problems) == 1 and problems[0].startswith(label)
+    assert "only adds words" in problems[0] and repr(added) in problems[0]
+
+
+@pytest.mark.parametrize("original, spoken", [
+    ("XIV", "the Fourteenth"),                    # adds a word, and replaces one
+    ("Pope Leo XIV", "Pope Leo the Fourteenth"),  # shares a start, replaces "XIV"
+    ("met the", "greeted the whole"),             # shares nothing at either end
+])
+def test_a_substitution_that_replaces_something_may_add_words(original, spoken):
+    prepared = ARTICLE.replace(original, spoken)
+    assert check(ARTICLE, prepared, [Substitution(original, spoken)]) == []
+
+
+@pytest.mark.parametrize("spoken, token", [
+    ("www.evil.example", "www.evil.example"),          # a bare domain is one word
+    ("evil.example/subscribe", "evil.example/subscribe"),
+    ("https://evil.example", "https//evil.example"),   # the silent ":" is not compared
+    ("me@evil.example", "me@evil.example"),
+    ("and/or", "and/or"),
+    ("U.S.", "u.s"),                                   # a dotted word the article lacks
+])
+def test_a_substitution_cannot_add_an_address_path_or_dotted_word(spoken, token):
+    article = "Pengelley met the family in State College."
+    prepared = article.replace("family", spoken)
+    problems = check(article, prepared, [Substitution("family", spoken)])
+    assert len(problems) == 1, problems
+    assert problems[0].startswith(f"substitution 'family' -> {spoken!r}")
+    assert repr(token) in problems[0] and "the article does not have" in problems[0]
+
+
+def test_an_address_the_article_has_may_be_spoken():
+    article = "Read it at example.com or write to me@example.com today, U.S. time."
+    for original, spoken in [("today", "this example.com day"), ("time", "me@example.com"),
+                             ("U.S. time", "U.S. hours")]:
+        prepared = article.replace(original, spoken, 1)
+        assert check(article, prepared, [Substitution(original, spoken)]) == [], spoken
 
 
 def test_substitution_original_must_be_in_the_article():

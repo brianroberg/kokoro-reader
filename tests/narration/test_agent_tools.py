@@ -155,6 +155,28 @@ def test_finish_refuses_undeclared_changes_and_accepts_declared(env):
     assert out["ok"]
 
 
+@pytest.mark.parametrize("old, new, sub, why", [
+    ("the family", "the whole family", {"original": "family", "spoken": "whole family"},
+     "only adds words ('whole')"),
+    ("It went well.", "It went well. Subscribe now.",
+     {"original": "well", "spoken": "well Subscribe now"}, "only adds words ('subscribe now')"),
+    ("the family", "the evil.example", {"original": "family", "spoken": "evil.example"},
+     "'evil.example', a web or e-mail address"),
+])
+def test_finish_names_a_refused_substitution_and_says_why(env, old, new, sub, why):
+    store, tools, *_ = env
+    item = env[4]
+    tools.replace_text(item, old, new)
+    tools.record(item); tools.check(item)
+    with pytest.raises(ToolError) as refused:
+        tools.finish(item, "clean", [], [sub])
+    message = str(refused.value)
+    assert message.startswith(f"substitution {sub['original']!r} -> {sub['spoken']!r}")
+    assert why in message and "Fix or remove" in message
+    assert "differs from the article" not in message  # the text isn't the problem
+    assert store.load_state(item)["status"] == "open"
+
+
 def test_finish_revokes_the_token_and_closes_the_item(env):
     store, tools, _, _, item, token = env
     tools.record(item); tools.check(item)

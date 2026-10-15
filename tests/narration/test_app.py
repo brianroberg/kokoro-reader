@@ -325,6 +325,8 @@ def test_the_agent_is_told_how_to_work(client):
     assert "by hand" in tools["phonemes"] and "substitution" in tools["phonemes"]
     assert "one call at a time" in tools["phonemes"]  # the tool most likely called in parallel
     assert "respelling" in tools["finish"]
+    finish = " ".join(tools["finish"].split())
+    assert "not only add" in finish and "address" in finish  # what finish refuses (I2)
 
 
 def test_the_runner_is_told_when_to_force_and_what_status_returns(client):

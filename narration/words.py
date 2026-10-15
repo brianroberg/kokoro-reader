@@ -94,8 +94,12 @@ separately (Task 4).
 
 Every change to the words themselves must be declared as a Substitution, and
 declared substitutions are bounded so they can't carry new content: each one is
-short, and across the whole text all of them together may add only a few words
-and change only a few words, however many times each is applied. Only a
+short, must replace some of the article's words (set aside the words both sides
+share at the start and the end, and something of the original must be left: "long"
+to "long subscribe now" only adds words, and is refused), may not add a web or
+e-mail address, a path or a dotted word the article doesn't have ("www.evil.example"
+would otherwise be one word), and across the whole text all of them together may
+add only a few words and change only a few words, however many times each is applied. Only a
 respelling is free of the second budget, and "respelling" is a syntactic
 notion here (same letters spaced differently, or two long, very alike words),
 not a judgment that the sounds are the same, so respellings are capped by
@@ -168,6 +172,8 @@ _DIGIT_APOSTROPHE = re.compile(r"(?<=\d)'|'(?=\d)")
 _SPACES = re.compile(r"[^\S\n]+")
 _RUN = re.compile(r"\S+")  # str.split()'s runs: re's \s and str.isspace() agree on every character
 _LOOSE_SPACES = re.compile(r" *\n *| {2,}")
+_DOTTED = re.compile(r"[^\W_]\.[^\W_]")  # a dot between two letters or digits
+_LETTER = re.compile(r"[^\W\d_]")
 
 
 @dataclass(frozen=True)
@@ -568,10 +574,24 @@ def _too_many(subs: list[Substitution]) -> str:
     return f"{len(subs)} substitutions declared; the limit is {MAX_SUBSTITUTIONS}"
 
 
+def declaration_problems(source: str, substitutions: list[Substitution]) -> list[str]:
+    """What is wrong with the declarations themselves, whatever the prepared text
+    says: the problems audit reports for them before it aligns anything."""
+    return _check_substitutions(words(source), substitutions)
+
+
+def _address_like(token: str) -> bool:
+    """Whether a token is a web or e-mail address, a path or a dotted word
+    ("example.com", "U.S."): it has a "/" or an "@", or a dot between two letters or
+    digits and a letter somewhere (so "3.5" is not one)."""
+    return ("/" in token or "@" in token
+            or bool(_DOTTED.search(token) and _LETTER.search(token)))
+
+
 def _check_substitutions(src: list[str], subs: list[Substitution]) -> list[str]:
     if len(subs) > MAX_SUBSTITUTIONS:  # before reading any of them
         return [_too_many(subs)]
-    problems = []
+    problems, in_article = [], None
     for s in subs:
         o, sp = words(s.original), words(s.spoken)
         label = f"substitution {s.original!r} -> {s.spoken!r}"
@@ -581,6 +601,21 @@ def _check_substitutions(src: list[str], subs: list[Substitution]) -> list[str]:
         if o == sp:
             problems.append(f"{label} changes nothing")
             continue
+        head, tail = _shared_ends(o, sp)
+        if head + tail >= len(o):
+            added = " ".join(sp[head:len(sp) - tail])
+            problems.append(f"{label} only adds words ({added!r}): set aside the words both "
+                            "sides share at the start and the end, and nothing of the "
+                            "original is left for them to replace. A substitution must "
+                            "replace some of the article's words, not only add to them")
+        addresses = [w for w in sp if _address_like(w)]
+        if addresses:
+            in_article = set(src) if in_article is None else in_article
+            for word in dict.fromkeys(w for w in addresses if w not in in_article):
+                problems.append(f"{label}: the spoken side has {word!r}, a web or e-mail "
+                                "address, a path or a dotted word (with '/', '@' or '.'), "
+                                "which the article does not have. A substitution may not "
+                                "add one; write what is read as separate words")
         if len(o) > MAX_SPOKEN_WORDS:
             problems.append(f"{label}: the original is too long: at most {MAX_SPOKEN_WORDS} words")
         if any(len(word) > _MAX_TOKEN for word in sp):
@@ -647,9 +682,9 @@ def _is_respelling(original: tuple, spoken: tuple) -> bool:
             and difflib.SequenceMatcher(None, a, b, autojunk=False).ratio() >= RESPELLING_RATIO)
 
 
-def _changed_words(original: tuple, spoken: tuple) -> int:
-    """Words that differ per application: what is left of each side once the
-    tokens they share at the start and end are set aside."""
+def _shared_ends(original, spoken) -> tuple[int, int]:
+    """How many tokens the two sides share at the start, and then at the end (never
+    overlapping the start: "a a" and "a b a" share one token each way)."""
     shortest = min(len(original), len(spoken))
     head = 0
     while head < shortest and original[head] == spoken[head]:
@@ -657,6 +692,13 @@ def _changed_words(original: tuple, spoken: tuple) -> int:
     tail = 0
     while tail < shortest - head and original[-1 - tail] == spoken[-1 - tail]:
         tail += 1
+    return head, tail
+
+
+def _changed_words(original: tuple, spoken: tuple) -> int:
+    """Words that differ per application: what is left of each side once the
+    tokens they share at the start and end are set aside."""
+    head, tail = _shared_ends(original, spoken)
     return max(len(original), len(spoken)) - head - tail
 
 

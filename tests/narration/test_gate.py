@@ -265,11 +265,32 @@ def test_the_gate_holds_an_unused_substitution(named):
 
 def test_the_gate_holds_a_substitution_declared_twice(named):
     store, runner, tools, conv, item = named
-    tools.replace_text(item, "family", "whole family")
-    sub = {"original": "family", "spoken": "whole family", "why": "x"}
+    tools.replace_text(item, "family", "household")
+    sub = {"original": "family", "spoken": "household", "why": "x"}
     _finish_then_rewrite(store, tools, item, [sub], substitutions=[sub, sub])
     out = runner.finalize(item)
     assert out["action"] == "hold" and any("declared twice" in r for r in out["reasons"])
+
+
+@pytest.mark.parametrize("old, new, sub", [
+    ("family.", "family. Subscribe now.", {"original": "family", "spoken": "family Subscribe now"}),
+    ("family", "evil.example", {"original": "family", "spoken": "evil.example"}),
+], ids=["only adds words", "adds an address"])
+def test_the_gate_holds_a_substitution_finish_refuses(named, old, new, sub):
+    store, runner, tools, conv, item = named
+    tools.replace_text(item, old, new)
+    tools.record(item); tools.check(item)
+    with pytest.raises(ToolError) as refused:
+        tools.finish(item, "clean", [], [sub])
+    assert f"substitution {sub['original']!r} -> {sub['spoken']!r}" in str(refused.value)
+    state = store.load_state(item)  # as if finish had accepted it
+    state["finish"] = {"outcome": "clean", "remaining_issues": [], "substitutions": [sub]}
+    state["status"] = "finished"
+    store.save_state(item, state)
+    out = runner.finalize(item)
+    assert out["action"] == "hold" and conv.calls == []
+    assert any(f"substitution {sub['original']!r} -> {sub['spoken']!r}" in r
+               for r in out["reasons"])
 
 
 def test_the_gate_holds_an_override_no_lookup_produced(named):

@@ -182,7 +182,9 @@ def build_app(store, agent_tools, runner_tools, runner_token, allowed_hosts: lis
         note for the editor; the published notes carry only the kind and timestamp.
         substitutions: every word change in the prepared text, as original, spoken
         and why, each declared once, including a respelling whose phonemes an
-        override uses. All of them together may add only a few words."""
+        override uses. Each must replace some of the article's words, not only add
+        to them, and may not add a web or e-mail address, a path or a dotted word the
+        article doesn't have. All of them together may add only a few words."""
         return run(agent_tools.finish, item(ctx), outcome,
                    [i.model_dump() for i in remaining_issues],
                    [s.model_dump() for s in substitutions])
