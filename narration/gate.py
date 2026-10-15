@@ -27,8 +27,8 @@ import os
 import re
 from dataclasses import dataclass, field
 
-from narration.agent_tools import (ToolError, _latest_checks, _sha256, validate_finish,
-                                   validate_substitutions)
+from narration.agent_tools import (ToolError, _issue, _latest_checks, _sha256, _substitution,
+                                   validate_finish, validate_substitutions)
 from narration.words import _PHONETIC, Substitution, apply_with_reason, check, engine_text
 
 # misaki's stress and length marks: kept in the comparison with the letters. Its
@@ -53,19 +53,35 @@ def album_for(metadata: dict) -> str:
 
 
 def notes_for(metadata: dict, finish: dict) -> str:
-    """The published episode notes. An issue appears as its timestamp and kind only:
-    validate_finish checked both against a pattern and a fixed list, so no text the
-    session wrote reaches the feed. The free-text note is for Brian, in result.json.
-    Every declared substitution is listed, override-respellings included."""
+    """The published episode notes. An issue appears as its timestamp and kind only,
+    which agent_tools checks against a pattern and a fixed list; its free-text note
+    is for Brian, in result.json. Every declared substitution is listed,
+    override-respellings included, its original and spoken text as written: agent_tools
+    allows one line of plain text for each. Each entry is checked again here with
+    finish's own validators, and one that fails (in a record written before a rule
+    existed) is left out."""
+    issues = _valid(_issue, finish.get("remaining_issues"))
+    subs = _valid(_substitution, finish.get("substitutions"))
     parts = [metadata.get("description", "").strip()]
-    if finish.get("remaining_issues"):
+    if issues:
         parts.append("Known issues in this recording:")
-        parts += [f"- {i['where']} {i['kind']}" for i in finish["remaining_issues"]]
-    if finish.get("substitutions"):
+        parts += [f"- {i['where']} {i['kind']}" for i in issues]
+    if subs:
         parts.append("Read with these substitutions:")
-        parts += [f"- \"{s['original']}\" read as \"{s['spoken']}\"" for s in finish["substitutions"]]
+        parts += [f"- \"{s['original']}\" read as \"{s['spoken']}\"" for s in subs]
     parts.append("Recorded automatically.")
     return "\n".join(p for p in parts if p)
+
+
+def _valid(validator, entries) -> list[dict]:
+    """The entries that pass `validator` (agent_tools' own), as it returns them."""
+    valid = []
+    for entry in entries if isinstance(entries, list) else []:
+        try:
+            valid.append(validator(entry))
+        except ToolError:
+            continue
+    return valid
 
 
 def speech_matches(g2p, source: str, prepared: str, substitutions: list[Substitution]) -> list[str]:

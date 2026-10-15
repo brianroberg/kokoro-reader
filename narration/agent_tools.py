@@ -46,9 +46,14 @@ OUTCOMES = ("clean", "minor", "hold")
 # Matched with fullmatch: `$` alone would also accept a trailing newline.
 VOICE_RE = re.compile(r"^[a-z]{2}_[a-z]{2,20}$")
 MAX_FIELD = 200
-# An issue is a kind from this list, a timestamp, and a short note. Only the kind
-# and the timestamp reach the published episode notes (gate.notes_for); the note
-# is for Brian, in result.json. So no text a session writes can land in the feed.
+# Characters a substitution's text may not have: markdown, HTML and link syntax.
+NOT_PLAIN = frozenset("<>[](){}#*_`|\\!")
+# What a session writes that reaches the published episode notes (gate.notes_for):
+# each issue's kind, from this list, and its timestamp, matched by WHERE_RE (its free
+# note is for Brian, in result.json, never published); and each substitution's
+# original and spoken text, which are bounded to one line of plain text (_plain: no
+# markup or control characters, at most MAX_FIELD characters), and which the word
+# check and its budgets bound to a few words of the article and what is read for them.
 ISSUE_KINDS = ("mispronunciation", "pacing", "artifact", "truncation", "other")
 # m:ss to mmm:ss in ASCII digits, seconds below 60; matched with fullmatch.
 WHERE_RE = re.compile(r"^[0-9]{1,3}:[0-5][0-9]$")
@@ -82,12 +87,28 @@ def _issue(i):
     return {"kind": kind, "where": where, "note": _short(i.get("note", ""), "note", MAX_NOTE)}
 
 
+def _plain(value, field, optional=False):
+    """One line of plain text: at most MAX_FIELD characters, a letter or digit in it,
+    no line break, control or format character (a zero-width or direction mark), and
+    none of NOT_PLAIN. Substitutions are published in the episode notes as written."""
+    if optional and value == "":
+        return value
+    if (not isinstance(value, str) or len(value) > MAX_FIELD
+            or not re.search(r"[^\W_]", value)
+            or any(ch in NOT_PLAIN or unicodedata.category(ch)[0] == "C"
+                   or unicodedata.category(ch) in ("Zl", "Zp") for ch in value)):
+        raise ToolError(f"substitution {field} must be one line of plain text: at most "
+                        f"{MAX_FIELD} characters, with a letter or digit, no line breaks or "
+                        f"control characters, and none of {' '.join(sorted(NOT_PLAIN))}")
+    return value
+
+
 def _substitution(s):
     if not isinstance(s, dict):
         raise ToolError("each substitution must be an object with original, spoken and why")
-    return {"original": _short(s.get("original"), "original"),
-            "spoken": _short(s.get("spoken"), "spoken"),
-            "why": _short(s.get("why", ""), "why")}
+    return {"original": _plain(s.get("original"), "original"),
+            "spoken": _plain(s.get("spoken"), "spoken"),
+            "why": _plain(s.get("why", ""), "why", optional=True)}
 
 
 def _lookup_word(word) -> str:

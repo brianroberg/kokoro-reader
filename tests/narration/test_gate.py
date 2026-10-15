@@ -536,3 +536,56 @@ def test_misaki_hears_a_sign_the_word_check_misses():
     prepared = "He said([Lawler](/lˈɔlɚ/)) that [Pengelley](/pɛnʤˈɛli/) left."
     assert check(article, prepared, []) == []
     assert speech_matches(g2p, article, prepared, [])
+
+
+# ---- fix round 1 ----
+# C1: a substitution's strings are one line of plain text, so none can carry markup into the feed
+INJECTIONS = ["[Penjelly](https://evil.example/buy)", "Penjelly\n\n![x](https://evil.example/p.png)",
+              "```<script>alert(1)</script>```", "## Buy at evil.example", "</p><h1>Hacked</h1>"]
+
+
+@pytest.mark.parametrize("field", ["original", "spoken", "why"])
+@pytest.mark.parametrize("text", INJECTIONS)
+def test_finish_refuses_a_substitution_that_is_not_one_line_of_plain_text(named, field, text):
+    store, runner, tools, conv, item = named
+    tools.record(item); tools.check(item)
+    sub = {**RESPELLING, field: text}
+    for outcome, issues in (("clean", []), ("hold", [ISSUE])):
+        with pytest.raises(ToolError, match=f"substitution {field} must be one line of plain text"):
+            tools.finish(item, outcome, issues, [sub])
+    assert store.load_state(item)["status"] == "open"
+
+
+@pytest.mark.parametrize("text", ["Pen\tjelly", "Pen\rjelly", "Pen jelly", "Pen​jelly",
+                                  "Pen‮jelly", "a|b", "a\\b", "a!", "a{b}", "a_b", "...", "",
+                                  "x" * 201])
+def test_a_substitution_string_needs_a_word_and_no_markup_or_control_characters(text):
+    with pytest.raises(ToolError, match="substitution spoken must be one line of plain text"):
+        agent_tools.validate_finish("clean", [], [{"original": "Pengelley", "spoken": text}])
+
+
+@pytest.mark.parametrize("text", ["the Fourteenth", "U.S.", "Pengelley's", "Ocasio-Cortez",
+                                  "$3.50", "5%", "No. 5, e.g.", "Saint-Saëns", '"quoted"'])
+def test_plain_substitution_strings_pass(text):
+    issues, subs = agent_tools.validate_finish("clean", [], [{"original": "x", "spoken": text}])
+    assert subs == [{"original": "x", "spoken": text, "why": ""}]
+
+
+@pytest.mark.parametrize("text", INJECTIONS)
+def test_an_old_record_with_markup_in_a_substitution_is_never_published(text):
+    finish = {"outcome": "clean", "remaining_issues": [],
+              "substitutions": [{"original": "Pengelley", "spoken": text, "why": ""},
+                                {"original": "XIV", "spoken": "the Fourteenth", "why": "numeral"}]}
+    notes = notes_for(META, finish)
+    assert "evil" not in notes and "<" not in notes and "#" not in notes and "Penjelly" not in notes
+    assert '- "XIV" read as "the Fourteenth"' in notes  # the valid one is still listed
+    out = evaluate(_state(finish=finish), ARTICLE, ARTICLE, META, G2P)
+    assert out.action == "hold" and "evil" not in out.notes and "<" not in out.notes
+
+
+def test_notes_drop_an_issue_an_old_record_got_wrong():
+    finish = {"outcome": "minor", "substitutions": [],
+              "remaining_issues": [{"kind": "pacing", "where": "1:10\n<b>x</b>", "note": ""},
+                                   {"kind": "<i>", "where": "1:10", "note": ""}, ISSUE]}
+    notes = notes_for(META, finish)
+    assert "<" not in notes and "- 1:10 pacing" in notes and notes.count("\n- ") == 1
