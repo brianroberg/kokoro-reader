@@ -6,10 +6,12 @@ gate additionally compares the engine's own phoneme output (Task 5); this
 module is the fast, explainable pre-check.
 
 Both texts are read as the engine receives them: text_to_speech.clean_markdown_text
-(the cleaning the CLI and KokoroEngine apply) and then prepare_for_tts (which
-turns "--" into "... " before generate_audio hands the text to misaki). Nothing
-else is done to the characters: no Unicode normalisation (a fullwidth "＄" is
-not "$"). The only other edits are to drop [BREAK] markers, read a phonetic
+(the cleaning the CLI and KokoroEngine apply), then every run of whitespace other
+than a newline made one plain space (as KokoroEngine does: misaki misplaces an
+override after a no-break, thin or ideographic space or a tab on the same line),
+then prepare_for_tts (which turns "--" into "... " before generate_audio hands
+the text to misaki). Nothing else is done to the characters: no Unicode
+normalisation (a fullwidth "＄" is not "$"). The only other edits are to drop [BREAK] markers, read a phonetic
 override as its displayed word, and read a curly apostrophe as a straight one,
 as misaki does.
 
@@ -76,13 +78,15 @@ Accepted residuals, where misaki and the check still differ:
   provenance rule.
 And the check refuses some edits the engine reads the same way (a sentence-final
 "No." turned into "No,", "Dr." into "Dr", "1,000" into "1000", spacing around a
-symbol), since a refusal only costs a retry.
+symbol, an override joined by a hyphen to a digit or to nothing, "5-[x](/…/)"),
+since a refusal only costs a retry.
 
 A phonetic override is validated for shape (one displayed word, a pronunciation
 with a letter, no whitespace, limited length) and must stand alone, a whole,
 separately spaced word with at most an opening bracket or quote before it and
-closing punctuation after it, since misaki misplaces one that shares a token
-with anything else. Its phonemes are not checked to say that word: an override
+closing punctuation after it, or a hyphen joining it to a letter (a name such as
+"Ocasio-[Cortez](/…/)" or "[Pengelley](/…/)-Smith"), since misaki misplaces one
+that shares a token with anything else. Its phonemes are not checked to say that word: an override
 can pronounce any single word. The server validates override provenance
 separately (Task 4).
 
@@ -151,12 +155,14 @@ _TOKEN = re.compile(rf"{_NUMBER.pattern}|{_WORD}(?:\.{_WORD})+|(?:{_ABBREVIATION
                     rf"|{_WORD}|\S")
 _SIGNS = ("-.", "-", ".")  # what may stand right before a number's digits, longest first
 # What may touch a phonetic override: an opening bracket or quote before its "[", and
-# closing marks after its ")", then whitespace. Anything else glued to it lands in the
-# same spaCy token, and misaki then puts the override on the wrong word.
+# closing marks after its ")", then whitespace; or a hyphen with a letter beyond it.
+# Anything else glued to it lands in the same spaCy token, and misaki then puts the
+# override on the wrong word.
 _BEFORE_OVERRIDE = frozenset("([{\"“‘'")
 _AFTER_OVERRIDE = frozenset(".,;:!?)]}\"”’'")
 _WORD_CHAR = re.compile(r"[^\W_]")
 _DIGIT_APOSTROPHE = re.compile(r"(?<=\d)'|'(?=\d)")
+_SPACES = re.compile(r"[^\S\n]+")
 
 
 @dataclass(frozen=True)
@@ -172,7 +178,7 @@ def added_words_limit(source_words: int) -> int:
 
 def _spoken_text(text: str) -> str:
     """The text as the engine receives it, minus [BREAK] markers."""
-    text = prepare_for_tts(clean_markdown_text(text))
+    text = prepare_for_tts(_SPACES.sub(" ", clean_markdown_text(text)))
     return text.replace("’", "'").replace("‘", "'").replace("[BREAK]", " ")
 
 
@@ -297,9 +303,16 @@ def _stands_alone(spoken: str, start: int, end: int) -> bool:
     """Whether the override at spoken[start:end] is a word of its own: whitespace (or
     the start) or an opening bracket or quote before it, and after it closing marks,
     if any, then whitespace or the end. misaki reads '(x)', '"x",', 'x.', 'x...' (what
-    prepare_for_tts makes of "x --") and 'x?!' with the override in place."""
-    if start and not spoken[start - 1].isspace() and spoken[start - 1] not in _BEFORE_OVERRIDE:
+    prepare_for_tts makes of "x --") and 'x?!' with the override in place. A hyphen
+    may join it to a letter on either side, as in a name ("Jean-[Luc](/lˈuk/)",
+    "[Pengelley](/pɛnʤˈɛli/)-Smith"), which misaki also reads in place; not to a digit
+    ("[Covid](/…/)-19" loses "19") or to nothing ("-[is](/ɪz/) not" loses "not")."""
+    hyphen_before = start >= 2 and spoken[start - 1] == "-" and spoken[start - 2].isalpha()
+    if (start and not spoken[start - 1].isspace() and spoken[start - 1] not in _BEFORE_OVERRIDE
+            and not hyphen_before):
         return False
+    if spoken[end:end + 1] == "-" and spoken[end + 1:end + 2].isalpha():
+        return True
     while end < len(spoken) and spoken[end] in _AFTER_OVERRIDE:
         end += 1
     return end == len(spoken) or spoken[end].isspace()

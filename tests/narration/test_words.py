@@ -4,6 +4,7 @@ import pytest
 from hypothesis import given, settings, strategies as st
 
 from narration.words import DOTTED_ABBREVIATIONS, Substitution, added_words_limit, check, words
+from narration.words import _spoken_text
 
 ARTICLE = "Pope Leo XIV met the Pengelley family in State College.\n\nIt went well -- mostly."
 
@@ -661,6 +662,44 @@ def test_an_override_standing_alone_is_fine(article, prepared):
 ])
 def test_an_override_followed_by_closing_marks_is_fine(article, prepared):
     assert check(article, prepared, []) == []
+
+
+@pytest.mark.parametrize("article, prepared", [
+    # misaki reads each with the override in place (e.g. "ʤinluk pɪkɑɹd", "pɛnʤɛlismɪθ")
+    ("Rep. Ocasio-Cortez spoke today.", "Rep. [Ocasio](/OkˈɑsiO/)-Cortez spoke today."),
+    ("Ocasio-Cortez spoke today.", "Ocasio-[Cortez](/kɔɹtˈɛz/) spoke today."),
+    ("Jean-Luc Picard spoke today.", "Jean-[Luc](/lˈuk/) Picard spoke today."),
+    ("Pengelley-Smith spoke today.", "[Pengelley](/pɛnʤˈɛli/)-Smith spoke today."),
+    ("The Kevorkian-era law passed.", "The [Kevorkian](/kɛvˈɔɹkiən/)-era law passed."),
+])
+def test_an_override_in_a_hyphenated_name_is_fine(article, prepared):
+    assert check(article, prepared, []) == []
+
+
+@pytest.mark.parametrize("article, prepared, override", [
+    # A hyphen may join an override only to a letter. These read in place in misaki
+    # ("fIvɛks", "ɛks nW") but are refused all the same, like "[Covid](…)-19" and
+    # "-[is](…)", which misplace.
+    ("Model 5-x ran today.", "Model 5-[x](/ˈɛks/) ran today.", "[x](/ˈɛks/)"),
+    ("It is x- now today.", "It is [x](/ˈɛks/)- now today.", "[x](/ˈɛks/)"),
+    ("It is x-5 now.", "It is [x](/ˈɛks/)-5 now.", "[x](/ˈɛks/)"),
+])
+def test_a_hyphen_next_to_an_override_needs_a_letter_on_its_other_side(article, prepared, override):
+    problems = check(article, prepared, [])
+    assert any(override in p and "separately spaced word" in p for p in problems)
+
+
+@pytest.mark.parametrize("space", ["\xa0", "\t", "\u2009", "\u3000", " \t\xa0 "])
+def test_any_whitespace_but_a_newline_reads_as_one_space(space):
+    # misaki loses "and" after such a space earlier on the line ("pɛnʤɛli kɛvɔɹkiən
+    # kɛvɔɹkiən"); the engine makes every one a plain space, and so does the check.
+    assert _spoken_text(f"a{space}b\n\nc{space}d") == "a b\n\nc d"
+    assert words(f"a{space}b") == words("a b") == ["a", "b"]
+    article = "We saw Pengelley and Kevorkian left."
+    assert check(article, f"We saw{space}Pengelley and [Kevorkian](/kɛvˈɔɹkiən/) left.", []) == []
+    assert check(article, f"We saw Pengelley and{space}[Kevorkian](/kɛvˈɔɹkiən/) left.", []) == []
+    problems = check(article, f"We saw Pengelley and{space}[Kevorkian](//) left.", [])
+    assert len(problems) == 1 and "[Kevorkian](//)" in problems[0]   # still found and checked
 
 
 # ---- bounds that keep the check fast ----
