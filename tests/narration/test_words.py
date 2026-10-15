@@ -1054,3 +1054,33 @@ def test_overrides_reads_each_override_as_the_engine_does():
 def test_is_respelling_applies_the_substitution_rule(a, b, expected):
     from narration.words import is_respelling
     assert is_respelling(a, b) is expected
+
+
+def test_audit_returns_the_problems_and_how_often_each_substitution_is_applied():
+    from narration.words import audit
+    article = "Pope Leo XIV met Leo XIV and the family."
+    fourteenth, bishop = Substitution("XIV", "the Fourteenth"), Substitution("Pope", "Bishop")
+    prepared = "Pope Leo the Fourteenth met Leo the Fourteenth and the family."
+    assert audit(article, prepared, [fourteenth, bishop]) == ([], {fourteenth: 2, bishop: 0})
+    assert check(article, prepared, [fourteenth, bishop]) == []
+    problems, counts = audit(article, prepared, [])  # no alignment, so no counts
+    assert problems and counts == {}
+    problems, counts = audit(article, article, [Substitution("absent", "x")])
+    assert "does not appear in the article" in problems[0] and counts == {}
+
+
+@pytest.mark.parametrize("prepared", [
+    "We saw [[BREAK]x](/ˈɛks/) today.",     # the engine splits it: "[" and "x](/ˈɛks/)"
+    "We saw [x[BREAK]](/ˈɛks/) today.",
+    "We saw [x](/ˈɛk[BREAK]s/) today.",
+    "We saw [x](/[BREAK]ˈɛks/) today.",
+])
+def test_an_override_with_a_break_marker_inside_it_is_refused(prepared):
+    problems = check("We saw x today.", prepared, [])
+    assert any("[BREAK] marker inside it" in p for p in problems)
+
+
+def test_a_break_marker_beside_an_override_is_fine():
+    article = "We saw x today. Then y."
+    assert check(article, "We saw [x](/ˈɛks/)\n\n[BREAK]\n\ntoday. Then [y](/wˈI/).", []) == []
+    assert check(article, "We saw [BREAK] [x](/ˈɛks/) today.[BREAK]Then [y](/wˈI/).", []) == []

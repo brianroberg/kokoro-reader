@@ -74,15 +74,16 @@ Accepted residuals, where misaki and the check still differ:
 - a silent mark glued to a year can switch misaki from "twenty twenty-three" to
   "two thousand twenty-three";
 - misaki garbles "-$3.50" and ranges such as "10,000-20,000";
-- override phonemes are not checked to say their word until Task 4's
-  provenance rule.
+- override phonemes are not checked to say their word here; the agent tools
+  check their provenance (agent_tools.finish).
 And the check refuses some edits the engine reads the same way (a sentence-final
 "No." turned into "No,", "Dr." into "Dr", "1,000" into "1000", spacing around a
 symbol, an override joined by a hyphen to a digit or to nothing, "5-[x](/…/)"),
 since a refusal only costs a retry.
 
 A phonetic override is validated for shape (one displayed word, a pronunciation
-with a letter, no whitespace, limited length) and must stand alone, a whole,
+with a letter, no whitespace, limited length, no [BREAK] marker inside it, since
+the engine splits the text there) and must stand alone, a whole,
 separately spaced word with at most an opening bracket or quote before it and
 closing punctuation after it, or a hyphen joining it to a letter (a name such as
 "Ocasio-[Cortez](/…/)" or "[Pengelley](/…/)-Smith"), since misaki misplaces one
@@ -102,6 +103,7 @@ see what was changed.
 """
 from __future__ import annotations
 
+import bisect
 import difflib
 import heapq
 import math
@@ -190,10 +192,27 @@ def normalize_spaces(text: str) -> str:
     return _SPACES.sub(" ", text)
 
 
+_BREAK = "[BREAK]"
+
+
+def _with_breaks(text: str) -> str:
+    """The text as the engine receives it, curly apostrophes read as straight ones."""
+    text = prepare_for_tts(normalize_spaces(clean_markdown_text(text)))
+    return text.replace("’", "'").replace("‘", "'")
+
+
 def _spoken_text(text: str) -> str:
     """The text as the engine receives it, minus [BREAK] markers."""
-    text = prepare_for_tts(normalize_spaces(clean_markdown_text(text)))
-    return text.replace("’", "'").replace("‘", "'").replace("[BREAK]", " ")
+    return _with_breaks(text).replace(_BREAK, " ")
+
+
+def _break_positions(with_breaks: str) -> list[int]:
+    """Where the space that replaces each [BREAK] marker lands in _spoken_text."""
+    positions, pos = [], with_breaks.find(_BREAK)
+    while pos >= 0:
+        positions.append(pos - (len(_BREAK) - 1) * len(positions))
+        pos = with_breaks.find(_BREAK, pos + len(_BREAK))
+    return positions
 
 
 def _is_word_char(text: str, k: int) -> bool:
@@ -303,29 +322,41 @@ def is_respelling(a: str, b: str) -> bool:
 
 def check(source: str, prepared: str, substitutions: list[Substitution]) -> list[str]:
     """Problems with `prepared` as a faithful reading of `source`; [] means it passes."""
+    return audit(source, prepared, substitutions)[0]
+
+
+def audit(source: str, prepared: str,
+          substitutions: list[Substitution]) -> tuple[list[str], dict[Substitution, int]]:
+    """check()'s problems, and how many times the alignment applies each substitution.
+    The counts are there only when the texts align (otherwise the dict is empty);
+    a substitution declared twice gets the sum."""
     if len(prepared) > max_prepared_length(len(source)):
         return [f"the prepared text is far longer than the article: {len(prepared)} "
-                f"characters against {len(source)}"]
+                f"characters against {len(source)}"], {}
     if len(substitutions) > MAX_SUBSTITUTIONS:
-        return [_too_many(substitutions)]
-    spoken = _spoken_text(prepared)
+        return [_too_many(substitutions)], {}
+    with_breaks = _with_breaks(prepared)
+    spoken = with_breaks.replace(_BREAK, " ")
     (src, src_shown), (prep, prep_shown) = _words_of(_spoken_text(source)), _words_of(spoken)
     limit = added_words_limit(len(src))
     if len(prep) > len(src) + limit:
         return [f"the prepared text has {len(prep)} words against the article's {len(src)}; "
-                f"substitutions may add at most {limit}"]
+                f"substitutions may add at most {limit}"], {}
     problems = _check_substitutions(src, substitutions)
     if problems:
-        return problems
-    problems = _check_overrides(spoken)
+        return problems, {}
+    problems = _check_overrides(spoken, _break_positions(with_breaks))
     pairs = [(tuple(words(s.original)), tuple(words(s.spoken))) for s in substitutions]
     aligned = _align(src, prep, pairs)
     if aligned is None:
         return problems + ["could not align the prepared text with the article "
-                           "(too many alternatives)"]
+                           "(too many alternatives)"], {}
     if isinstance(aligned, _Stuck):
-        return problems + [_describe(src, prep, pairs, aligned, (src_shown, prep_shown))]
-    return problems + _check_budgets(src, substitutions, pairs, aligned)
+        return problems + [_describe(src, prep, pairs, aligned, (src_shown, prep_shown))], {}
+    counts: dict[Substitution, int] = {}
+    for s, n in zip(substitutions, aligned):
+        counts[s] = counts.get(s, 0) + n
+    return problems + _check_budgets(src, substitutions, pairs, aligned), counts
 
 
 def _stands_alone(spoken: str, start: int, end: int) -> bool:
@@ -352,16 +383,22 @@ def _override_parts(m: re.Match) -> tuple[str, str]:
     return m.group(1).strip(), m.group(2).strip("/")
 
 
-def _check_overrides(spoken: str) -> list[str]:
+def _check_overrides(spoken: str, breaks: list[int] = ()) -> list[str]:
     """Each phonetic override is one displayed word with one bounded pronunciation,
     standing alone: misaki misplaces an override that shares a spaCy token with
     anything else ("Pengel[ley](/lˈA/) family" loses "family", "-[is](/ɪz/) not"
     loses "not", "[Covid](/kˈOvɪd/)-19" loses "19", "[1](/wˈʌn/),000" loses
-    "thousand"), and every later override on the line then shifts."""
+    "thousand"), and every later override on the line then shifts. `breaks` holds
+    where [BREAK] markers were (_break_positions): the engine splits the text at
+    each one, so an override with one inside is read as plain text."""
     problems = []
     for m in _PHONETIC.finditer(spoken):
         shown, phonemes = _override_parts(m)
         why = []
+        k = bisect.bisect_left(breaks, m.start())
+        if k < len(breaks) and breaks[k] < m.end():
+            why.append("it has a [BREAK] marker inside it, where the engine splits the text, "
+                       "so it would be read out as written")
         if not _stands_alone(spoken, m.start(), m.end()):
             why.append("it is glued to the text around it; an override must be a whole, "
                        "separately spaced word, with at most an opening bracket or quote "
