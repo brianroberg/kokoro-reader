@@ -28,12 +28,17 @@ class Converter(Protocol):
 class KokoroEngine:
     def record(self, text, out_path, voice, speed):
         from pydub import AudioSegment
+        from narration.words import normalize_spaces
         from text_to_speech import clean_markdown_text, generate_audio
         # The CLI's chain for a .md file: clean_markdown_text, then generate_audio
         # (which only runs prepare_for_tts). Without the cleaning, headings,
         # emphasis markers and link URLs are read aloud, and words.check can't
-        # catch it because it strips exactly that markup.
-        generate_audio(clean_markdown_text(text), str(out_path), voice=voice, speed=speed)
+        # catch it because it strips exactly that markup. Between the two, every
+        # space but a newline is made plain, as words.check reads the text: misaki
+        # misplaces an override after a no-break, thin or ideographic space or a
+        # tab earlier on its line.
+        text = normalize_spaces(clean_markdown_text(text))
+        generate_audio(text, str(out_path), voice=voice, speed=speed)
         return len(AudioSegment.from_file(out_path)) / 1000
 
 
@@ -47,8 +52,12 @@ class GeminiVerifier:
 
 class MisakiG2P:
     def __init__(self):
-        from misaki import en
-        self._g2p = en.G2P()
+        from misaki import en, espeak
+        # The engine's own configuration (mlx_audio's Kokoro pipeline for American
+        # English). A bare en.G2P() has no fallback and answers "❓" for every word
+        # outside misaki's lexicon, which is most names, the words overrides are for.
+        self._g2p = en.G2P(trf=False, british=False,
+                           fallback=espeak.EspeakFallback(british=False), unk="")
 
     def phonemes(self, word):
         out = self._g2p(word)

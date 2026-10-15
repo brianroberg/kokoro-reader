@@ -1017,3 +1017,40 @@ def test_property_any_undeclared_word_change_fails(data, paras):
     mutated = [m for m in mutated if m]
     prepared = data.draw(formatted(mutated)) if mutated else ""
     assert check(render(source), prepared, []) != []
+
+
+# ---- public helpers for the agent tools and the engine ----
+@pytest.mark.parametrize("space", ["\xa0", "\t", " ", "　", " \t\xa0 "])
+def test_normalize_spaces_keeps_newlines_and_makes_every_other_space_plain(space):
+    from narration.words import normalize_spaces
+    assert normalize_spaces(f"a{space}b\n\nc{space}d\n") == "a b\n\nc d\n"
+
+
+def test_overrides_reads_each_override_as_the_engine_does():
+    from narration.words import overrides
+    text = ("# Head\n\nSaid **[Pengelley](/pɛnʤˈɛli/)**, then [Kevorkian](//kɛvˈɔɹkiən//) "
+            "and [the court](https://example.com) [x]**(/ɛks/)**.")
+    # Emphasis and link URLs go first (so the last one becomes an override), and the
+    # phonemes are read after strip('/'), as words.check and misaki read them.
+    assert overrides(text) == [("Pengelley", "pɛnʤˈɛli"), ("Kevorkian", "kɛvˈɔɹkiən"),
+                               ("x", "ɛks")]
+    assert overrides("No overrides here.") == []
+
+
+@pytest.mark.parametrize("a, b, expected", [
+    ("Pengelley", "Pengelley", True),   # identical
+    ("Pengelley", "pengelley", True),   # case is folded
+    ("Pengelley", "Pengelly", True),    # two long, very alike words
+    ("Pengelly", "Pengelley", True),
+    ("DOJ", "D.O.J.", True),            # the same letters, spaced differently
+    ("well", "badly", False),
+    ("form", "from", False),            # short words that are alike are not exempt
+    ("legal", "illegal", False),
+    ("elected", "ejected", True),       # the syntactic rule's known residual
+    ("Pengelley", "Pen jelly", False),  # one word against two
+    ("", "", False),                    # no words: never a respelling
+    ("...", "...", False),
+])
+def test_is_respelling_applies_the_substitution_rule(a, b, expected):
+    from narration.words import is_respelling
+    assert is_respelling(a, b) is expected

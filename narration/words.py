@@ -176,9 +176,23 @@ def added_words_limit(source_words: int) -> int:
     return max(MAX_ADDED_WORDS, math.ceil(ADDED_WORDS_FRACTION * source_words))
 
 
+def max_prepared_length(source_length: int) -> int:
+    """The most characters the prepared text may have, for an article of this many:
+    check() refuses a longer one before reading it, and replace_text won't make one."""
+    return 2 * source_length + 10_000
+
+
+def normalize_spaces(text: str) -> str:
+    """Every run of whitespace other than a newline made one plain space. KokoroEngine
+    applies it after clean_markdown_text, and so does the check (_spoken_text): misaki
+    misplaces an override after a no-break, thin or ideographic space or a tab earlier
+    on the same line."""
+    return _SPACES.sub(" ", text)
+
+
 def _spoken_text(text: str) -> str:
     """The text as the engine receives it, minus [BREAK] markers."""
-    text = prepare_for_tts(_SPACES.sub(" ", clean_markdown_text(text)))
+    text = prepare_for_tts(normalize_spaces(clean_markdown_text(text)))
     return text.replace("’", "'").replace("‘", "'").replace("[BREAK]", " ")
 
 
@@ -272,9 +286,24 @@ def words(text: str) -> list[str]:
     return _words_of(_spoken_text(text))[0]
 
 
+def overrides(text: str) -> list[tuple[str, str]]:
+    """Each phonetic override in `text`, in order, as (displayed text, phonemes), read
+    as the check reads them: in the text the engine receives (so markup around one is
+    gone first), the phonemes after strip('/')."""
+    return [_override_parts(m) for m in _PHONETIC.finditer(_spoken_text(text))]
+
+
+def is_respelling(a: str, b: str) -> bool:
+    """Whether `b` is `a` spelled differently (or the same), by the rule that exempts a
+    substitution from the changed-words budget (_is_respelling), applied to their
+    words(). Text with no words is not a respelling of anything."""
+    wa, wb = tuple(words(a)), tuple(words(b))
+    return bool(wa and wb) and _is_respelling(wa, wb)
+
+
 def check(source: str, prepared: str, substitutions: list[Substitution]) -> list[str]:
     """Problems with `prepared` as a faithful reading of `source`; [] means it passes."""
-    if len(prepared) > 2 * len(source) + 10_000:
+    if len(prepared) > max_prepared_length(len(source)):
         return [f"the prepared text is far longer than the article: {len(prepared)} "
                 f"characters against {len(source)}"]
     if len(substitutions) > MAX_SUBSTITUTIONS:
@@ -318,6 +347,11 @@ def _stands_alone(spoken: str, start: int, end: int) -> bool:
     return end == len(spoken) or spoken[end].isspace()
 
 
+def _override_parts(m: re.Match) -> tuple[str, str]:
+    """An override's displayed text and its phonemes, as the engine reads them."""
+    return m.group(1).strip(), m.group(2).strip("/")
+
+
 def _check_overrides(spoken: str) -> list[str]:
     """Each phonetic override is one displayed word with one bounded pronunciation,
     standing alone: misaki misplaces an override that shares a spaCy token with
@@ -326,7 +360,7 @@ def _check_overrides(spoken: str) -> list[str]:
     "thousand"), and every later override on the line then shifts."""
     problems = []
     for m in _PHONETIC.finditer(spoken):
-        shown, phonemes = m.group(1).strip(), m.group(2).strip("/")  # as the engine reads it
+        shown, phonemes = _override_parts(m)
         why = []
         if not _stands_alone(spoken, m.start(), m.end()):
             why.append("it is glued to the text around it; an override must be a whole, "
