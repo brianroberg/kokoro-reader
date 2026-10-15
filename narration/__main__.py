@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import argparse
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import uvicorn
@@ -49,6 +51,33 @@ def _runner_token() -> str:
     return token
 
 
+# What the real engines need from MLX: an import and one computation on the GPU.
+GPU_PROBE = "import mlx.core as mx; mx.array([1]).item()"
+GPU_PROBE_SECONDS = 120  # a cold first import of the library can take a while
+
+
+def _check_gpu() -> None:
+    """Exit in one readable line unless MLX can use the GPU here. Without a Metal
+    device (a LaunchAgent session without GPU access, a sandbox) importing MLX aborts
+    the process (libc++abi, exit status 134) rather than raising, which launchd would
+    restart forever; so it is tried in a child process, before any engine loads."""
+    problem = ("MLX cannot use the GPU in this session (is this a LaunchAgent without "
+               "Metal access?): ")
+    try:
+        probe = subprocess.run([sys.executable, "-c", GPU_PROBE], capture_output=True,
+                               text=True, timeout=GPU_PROBE_SECONDS)
+    except subprocess.TimeoutExpired:
+        raise SystemExit(f"{problem}the probe did not answer within {GPU_PROBE_SECONDS} "
+                         "seconds") from None
+    except OSError as e:
+        raise SystemExit(f"{problem}the probe could not start: {e.strerror or e}") from None
+    if probe.returncode != 0:
+        said = [line.strip() for line in (probe.stderr or "").splitlines() if line.strip()]
+        detail = f": {said[-1][:300]}" if said else ""
+        raise SystemExit(f"{problem}the probe ({GPU_PROBE}) exited with status "
+                         f"{probe.returncode}{detail}")
+
+
 def _port() -> int:
     value = os.environ.get("NARRATION_PORT", "8770")
     try:
@@ -91,6 +120,7 @@ def main(argv=None):
         if not os.environ.get("GEMINI_API_KEY"):
             raise SystemExit("GEMINI_API_KEY is not set (environment or .env); the Gemini "
                              "verifier needs it. Pass --fake-engines to run without it.")
+        _check_gpu()
         from narration.engines import GeminiVerifier, KokoroEngine, MisakiG2P, Mp3Converter
         tts, ver, g2p, conv = KokoroEngine(), GeminiVerifier(), MisakiG2P(), Mp3Converter()
     store = WorkItemStore(data)
