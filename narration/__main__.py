@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import os
 import subprocess
 import sys
@@ -78,6 +79,23 @@ def _check_gpu() -> None:
                          f"{probe.returncode}{detail}")
 
 
+SPACY_MODEL = "en_core_web_sm"  # what misaki's English G2P loads
+
+
+def _check_spacy_model() -> None:
+    """Exit in one readable line unless the spaCy model the pronunciation lookup needs
+    imports. It comes from GitHub, not PyPI, so it is not in uv.lock, and a plain
+    `uv sync` removes it; misaki would then download it at every start."""
+    try:
+        importlib.import_module(SPACY_MODEL)
+    except Exception as e:  # missing, or a broken install
+        said = " ".join(str(e).split())  # one line
+        raise SystemExit(f"the spaCy model {SPACY_MODEL} does not import ({type(e).__name__}: "
+                         f"{said}); the pronunciation lookup needs it. Install it as the README "
+                         "says, and update with `uv sync --inexact`, which keeps it (a plain "
+                         "`uv sync` removes it)") from None
+
+
 def _port() -> int:
     value = os.environ.get("NARRATION_PORT", "8770")
     try:
@@ -121,6 +139,7 @@ def main(argv=None):
             raise SystemExit("GEMINI_API_KEY is not set (environment or .env); the Gemini "
                              "verifier needs it. Pass --fake-engines to run without it.")
         _check_gpu()
+        _check_spacy_model()
         from narration.engines import GeminiVerifier, KokoroEngine, MisakiG2P, Mp3Converter
         tts, ver, g2p, conv = KokoroEngine(), GeminiVerifier(), MisakiG2P(), Mp3Converter()
     store = WorkItemStore(data)

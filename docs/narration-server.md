@@ -13,7 +13,8 @@ On the Mac it runs as one LaunchAgent, `net.robergb.narration`, from the templat
 The plist assumes the checkout is at `~/tools/kokoro`. If it is somewhere else, change `WorkingDirectory` in the plist first.
 
 ```bash
-cd ~/tools/kokoro && git pull && uv sync
+cd ~/tools/kokoro && git pull && uv sync --inexact
+uv pip install en-core-web-sm@https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
 mkdir -p ~/.config/narration ~/Library/Logs/narration ~/narration-data
 openssl rand -hex 32 > ~/.config/narration/runner-token; chmod 600 ~/.config/narration/runner-token
 tailscale ip -4          # put this address in place of TAILNET_IP in the plist
@@ -21,6 +22,8 @@ cp deploy/net.robergb.narration.plist ~/Library/LaunchAgents/
 launchctl bootstrap gui/(id -u) ~/Library/LaunchAgents/net.robergb.narration.plist
 curl -s http://(tailscale ip -4):8770/health      # {"ok":true}
 ```
+
+Always sync with `uv sync --inexact`: the spaCy model `en_core_web_sm` comes from GitHub, not PyPI, so it is not in `uv.lock`, and a plain `uv sync` removes it (the second line installs it once, as the README does). With real engines the server exits at startup if the model is missing.
 
 (`(id -u)` is fish syntax. In bash, use `$(id -u)`, and `$(tailscale ip -4)` for the address.)
 
@@ -30,7 +33,7 @@ The server exits at startup if `GEMINI_API_KEY` is unset. Keep it in the checkou
 
 The logs are `~/Library/Logs/narration/out.log` and `err.log`. The runner token is the file `~/.config/narration/runner-token`. It goes to the deploy of the runner (Plan 3) and never travels through chat.
 
-To restart after a `git pull`: `launchctl kickstart -k gui/(id -u)/net.robergb.narration` (bash: `$(id -u)`). To remove it: `launchctl bootout gui/(id -u)/net.robergb.narration`.
+To restart after a `git pull` (and a `uv sync --inexact`): `launchctl kickstart -k gui/(id -u)/net.robergb.narration` (bash: `$(id -u)`). To remove it: `launchctl bootout gui/(id -u)/net.robergb.narration`.
 
 ## Check it from the home server's container
 

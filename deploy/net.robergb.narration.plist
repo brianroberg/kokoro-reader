@@ -16,6 +16,9 @@
   key to EnvironmentVariables below. Don't put a real key in this template and commit it.
   Never run the server behind a root path (uvicorn's root-path option): the bearer-token
   gate matches absolute request paths, and a root path would move them out from under it.
+  The spaCy model en_core_web_sm is installed outside uv.lock (it comes from GitHub, not
+  PyPI). `uv run` below keeps it, but a plain `uv sync` removes it: update the checkout
+  with `uv sync --inexact`. With real engines the server exits at startup without it.
 -->
 <plist version="1.0"><dict>
   <key>Label</key><string>net.robergb.narration</string>

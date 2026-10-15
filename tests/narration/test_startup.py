@@ -3,6 +3,7 @@ python -m narration makes before it loads the real engines."""
 import os
 import subprocess
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -76,6 +77,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("NARRATION_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
     monkeypatch.setattr("dotenv.load_dotenv", lambda *a, **k: False)
+    monkeypatch.setitem(sys.modules, "en_core_web_sm", types.ModuleType("en_core_web_sm"))
     served, built = [], []
     monkeypatch.setattr("uvicorn.run", lambda app, **kw: served.append(kw))
 
@@ -137,3 +139,36 @@ def test_fake_engines_never_probe_the_gpu(env, monkeypatch):
     calls = _probe(monkeypatch, (134, "", "no Metal"))
     main(["--fake-engines"])
     assert calls == [] and served
+
+
+# -- python -m narration, real engines: the spaCy model --
+
+def test_real_engines_need_the_spacy_model_installed(env, monkeypatch):
+    # en_core_web_sm comes from GitHub, not PyPI, so it is not in uv.lock and a plain
+    # `uv sync` removes it; misaki would then download it at every start.
+    from narration.__main__ import main
+    served, built = env
+    _probe(monkeypatch, (0, "", ""))
+    monkeypatch.setitem(sys.modules, "en_core_web_sm", None)  # import en_core_web_sm fails
+    with pytest.raises(SystemExit) as e:
+        main([])
+    message = e.value.code
+    assert isinstance(message, str) and "\n" not in message
+    assert "en_core_web_sm" in message and "uv sync --inexact" in message
+    assert not served and not built
+
+
+def test_the_gpu_probe_comes_before_the_spacy_model_check(env, monkeypatch):
+    from narration.__main__ import main
+    _probe(monkeypatch, (134, "", "No Metal device available"))
+    monkeypatch.setitem(sys.modules, "en_core_web_sm", None)
+    with pytest.raises(SystemExit, match="MLX cannot use the GPU"):
+        main([])
+
+
+def test_fake_engines_need_no_spacy_model(env, monkeypatch):
+    from narration.__main__ import main
+    served, _ = env
+    monkeypatch.setitem(sys.modules, "en_core_web_sm", None)
+    main(["--fake-engines"])
+    assert served
