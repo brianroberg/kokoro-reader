@@ -86,21 +86,76 @@ def test_a_substitution_that_replaces_something_may_add_words(original, spoken):
     assert check(ARTICLE, prepared, [Substitution(original, spoken)]) == []
 
 
-@pytest.mark.parametrize("spoken, token", [
-    ("www.evil.example", "www.evil.example"),          # a bare domain is one word
-    ("evil.example/subscribe", "evil.example/subscribe"),
-    ("https://evil.example", "https//evil.example"),   # the silent ":" is not compared
-    ("me@evil.example", "me@evil.example"),
-    ("and/or", "and/or"),
-    ("U.S.", "u.s"),                                   # a dotted word the article lacks
+@pytest.mark.parametrize("spoken, shown, spaced", [
+    ("www.evil.example", "www.evil.example", "www evil example"),  # a bare domain is one word
+    ("evil.example/subscribe", "evil.example/subscribe", "evil example subscribe"),
+    ("https://evil.example", "https://evil.example", "https evil example"),
+    ("me@evil.example", "me@evil.example", "me evil example"),
+    ("and/or", "and/or", "and or"),
+    ("U.S.", "U.S.", "U S"),                       # a dotted word the article lacks
+    ("kin of U.S.,", "U.S.,", "U S"),              # shown as written, its run whole
 ])
-def test_a_substitution_cannot_add_an_address_path_or_dotted_word(spoken, token):
+def test_a_substitution_cannot_add_an_address_path_or_dotted_word(spoken, shown, spaced):
     article = "Pengelley met the family in State College."
     prepared = article.replace("family", spoken)
     problems = check(article, prepared, [Substitution("family", spoken)])
     assert len(problems) == 1, problems
     assert problems[0].startswith(f"substitution 'family' -> {spoken!r}")
-    assert repr(token) in problems[0] and "the article does not have" in problems[0]
+    # N3 (re-review): the word as written, not folded, and the spaced form to use
+    assert f"the spoken side has {shown!r}," in problems[0]
+    assert "the article does not have" in problems[0]
+    assert f'write it as "{spaced}"' in problems[0]
+
+
+# N2 (re-review): lookalike dots, at signs and slashes, and any symbol glued between
+# two words, are addresses to this rule too (the words themselves are not changed)
+@pytest.mark.parametrize("spoken", [
+    "kin evil\uff0eexample",   # fullwidth full stop
+    "evil\u3002example",       # ideographic full stop
+    "evil\uff61example",       # halfwidth ideographic full stop
+    "me\uff20evil",            # fullwidth at sign
+    "evil\uff0fsubscribe",     # fullwidth solidus
+    "and\u2215or",             # division slash
+    "and\u2044or",             # fraction slash
+    "www\u2024evil\u2024example",  # one dot leader
+    "evil\u00b7example",       # a middle dot: a symbol between two words
+])
+def test_a_lookalike_address_is_refused_too(spoken):
+    article = "Pengelley met the family in State College."
+    problems = check(article, article.replace("family", spoken), [Substitution("family", spoken)])
+    assert len(problems) == 1 and "the article does not have" in problems[0], problems
+
+
+def test_the_article_s_own_address_may_be_spoken_in_a_lookalike_form():
+    article = "Read it at example.com today."
+    spoken = "at example\uff0ecom this day"
+    prepared = article.replace("at example.com today", spoken)
+    problems = check(article, prepared, [Substitution("at example.com today", spoken)])
+    assert not any("the article does not have" in p for p in problems), problems
+
+
+# N1 (re-review): a number range read out ("2-3" as "2 to 3") replaces the dash, which
+# makes no word, so it is not an insertion; it adds one word, within the budgets
+@pytest.mark.parametrize("original, spoken", [
+    ("2-3", "2 to 3"), ("5\u20136", "5 to 6"), ("1990\u20142000", "1990 to 2000"),
+    ("2/3", "2 to 3"), ("9:30", "9 to 30"), ("2 - 3", "2 to 3"),
+])
+def test_a_number_range_may_be_read_out(original, spoken):
+    article = f"The work took {original} weeks, the council said."
+    prepared = article.replace(original, spoken)
+    assert check(article, prepared, [Substitution(original, spoken)]) == []
+
+
+@pytest.mark.parametrize("article, original, spoken", [
+    ("The fishermen said the season was long.", "long", "long subscribe now"),
+    ("Pengelley met the family.", "family", "whole family"),
+    ("The work took 2 3 weeks.", "2 3", "2 to 3"),      # no mark between them
+    ("It ran a-b today.", "a-b", "a to b"),             # letters, not digits
+    ("It took 2-3 weeks.", "2-3", "2-3 subscribe"),     # added at the end, not at the dash
+])
+def test_an_insertion_away_from_a_number_range_is_still_refused(article, original, spoken):
+    problems = check(article, article.replace(original, spoken, 1), [Substitution(original, spoken)])
+    assert any("only adds words" in p for p in problems), problems
 
 
 def test_an_address_the_article_has_may_be_spoken():

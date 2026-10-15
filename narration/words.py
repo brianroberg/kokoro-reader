@@ -96,9 +96,11 @@ Every change to the words themselves must be declared as a Substitution, and
 declared substitutions are bounded so they can't carry new content: each one is
 short, must replace some of the article's words (set aside the words both sides
 share at the start and the end, and something of the original must be left: "long"
-to "long subscribe now" only adds words, and is refused), may not add a web or
+to "long subscribe now" only adds words, and is refused, while "2-3" to "2 to 3"
+replaces the dash of a number range), may not add a web or
 e-mail address, a path or a dotted word the article doesn't have ("www.evil.example"
-would otherwise be one word), and across the whole text all of them together may
+would otherwise be one word; lookalike dots, at signs and slashes count, and so does
+any symbol between two words), and across the whole text all of them together may
 add only a few words and change only a few words, however many times each is applied. Only a
 respelling is free of the second budget, and "respelling" is a syntactic
 notion here (same letters spaced differently, or two long, very alike words),
@@ -113,6 +115,7 @@ import difflib
 import heapq
 import math
 import re
+import unicodedata
 from dataclasses import dataclass
 from typing import NamedTuple
 
@@ -628,12 +631,55 @@ def declaration_problems(source: str, substitutions: list[Substitution]) -> list
     return _check_substitutions(words(source), substitutions)
 
 
+# Dots and slashes NFKC leaves alone; it makes the fullwidth ones and the one dot leader
+# plain itself.
+_LOOKALIKES = str.maketrans({"\u3002": ".", "\uff61": ".", "\u2024": ".",
+                             "\u2215": "/", "\u2044": "/"})
+# Marks that join the two numbers of a range ("2-3", "1990–2000"); none is a word.
+_RANGE_MARKS = frozenset("-–—/:")
+
+
+def _plain_form(text: str) -> str:
+    """Text as the address rule reads it (and only that rule; words() does not):
+    NFKC-normalised, so a fullwidth "．", "＠" or "／" is a plain one, and the
+    lookalike dots and slashes NFKC keeps made plain too."""
+    return unicodedata.normalize("NFKC", text).translate(_LOOKALIKES)
+
+
 def _address_like(token: str) -> bool:
-    """Whether a token is a web or e-mail address, a path or a dotted word
-    ("example.com", "U.S."): it has a "/" or an "@", or a dot between two letters or
-    digits and a letter somewhere (so "3.5" is not one)."""
+    """Whether a token (of _plain_form text) is a web or e-mail address, a path or a
+    dotted word ("example.com", "U.S."): it has a "/" or an "@", or a dot between two
+    letters or digits and a letter somewhere (so "3.5" is not one), or any other
+    symbol between two letters or digits ("evil·example")."""
     return ("/" in token or "@" in token
-            or bool(_DOTTED.search(token) and _LETTER.search(token)))
+            or bool(_DOTTED.search(token) and _LETTER.search(token))
+            or any(_is_symbol(token[k]) and _WORD_CHAR.match(token[k - 1])
+                   and _WORD_CHAR.match(token[k + 1]) for k in range(1, len(token) - 1)))
+
+
+def _added_addresses(spoken: str, in_article: set[str]) -> list[tuple[str, str]]:
+    """Each run of `spoken` (as written) with an address-like token the article does
+    not have, and the run's words spaced apart ("U.S." and "U S")."""
+    found = []
+    for run in dict.fromkeys(spoken.split()):
+        plain = _plain_form(run)
+        if any(_address_like(w) and w not in in_article for w in words(plain)):
+            found.append((run, " ".join(re.findall(r"[^\W_]+", plain))))
+    return found
+
+
+def _range_at(original: str, k: int) -> bool:
+    """Whether a range mark joins the original's tokens k - 1 and k: only marks from
+    _RANGE_MARKS (and spaces) between them, a digit on each side, as in "2-3" or
+    "1990 – 2000". Words inserted there replace the mark, which makes no word."""
+    text = _PHONETIC.sub(r"\1", _spoken_text(original))
+    spans = _token_spans(text)
+    if not 0 < k < len(spans):
+        return False
+    end, start = spans[k - 1][3], spans[k][2]
+    marks = [ch for ch in text[end:start] if not ch.isspace()]
+    return (bool(marks) and all(ch in _RANGE_MARKS for ch in marks)
+            and text[end - 1].isdigit() and text[start].isdigit())
 
 
 def _check_substitutions(src: list[str], subs: list[Substitution]) -> list[str]:
@@ -650,20 +696,21 @@ def _check_substitutions(src: list[str], subs: list[Substitution]) -> list[str]:
             problems.append(f"{label} changes nothing")
             continue
         head, tail = _shared_ends(o, sp)
-        if head + tail >= len(o):
+        if head + tail >= len(o) and not _range_at(s.original, head):
             added = " ".join(sp[head:len(sp) - tail])
             problems.append(f"{label} only adds words ({added!r}): set aside the words both "
                             "sides share at the start and the end, and nothing of the "
                             "original is left for them to replace. A substitution must "
                             "replace some of the article's words, not only add to them")
-        addresses = [w for w in sp if _address_like(w)]
-        if addresses:
-            in_article = set(src) if in_article is None else in_article
-            for word in dict.fromkeys(w for w in addresses if w not in in_article):
-                problems.append(f"{label}: the spoken side has {word!r}, a web or e-mail "
-                                "address, a path or a dotted word (with '/', '@' or '.'), "
-                                "which the article does not have. A substitution may not "
-                                "add one; write what is read as separate words")
+        if any(_address_like(w) for w in words(_plain_form(s.spoken))):
+            if in_article is None:
+                in_article = {_plain_form(w) for w in src}
+            for run, spaced in _added_addresses(s.spoken, in_article):
+                fix = f'write it as "{spaced}", as separate words' if spaced else "leave it out"
+                problems.append(f"{label}: the spoken side has {run!r}, a web or e-mail "
+                                "address, a path or a dotted word (with '/', '@', '.' or "
+                                "another mark between words), which the article does not "
+                                f"have. A substitution may not add one: {fix}")
         if len(o) > MAX_SPOKEN_WORDS:
             problems.append(f"{label}: the original is too long: at most {MAX_SPOKEN_WORDS} words")
         if any(len(word) > _MAX_TOKEN for word in sp):

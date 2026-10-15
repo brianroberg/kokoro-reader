@@ -833,3 +833,19 @@ def test_open_refuses_an_article_with_no_text_once_its_images_are_dropped(tmp_pa
     with pytest.raises(ToolError, match="no text"):
         runner.open("![A chart](/images/chart.png)\n", META)
     assert list((tmp_path / "items").iterdir()) == []
+
+
+# N1 (re-review): reading a number range out passes the whole path
+def test_a_number_range_read_out_publishes_with_its_substitution_in_the_notes(tmp_path):
+    store = WorkItemStore(tmp_path)
+    conv = FakeConverter()
+    runner = RunnerTools(store, conv, FakeG2P())
+    tools = AgentTools(store, FakeTTS(), FakeVerifier(), FakeG2P())
+    item = runner.open("The work took 2-3 weeks.\n\nThe council agreed.", META)["item_id"]
+    tools.replace_text(item, "2-3", "2 to 3")
+    tools.record(item); tools.check(item)
+    sub = {"original": "2-3", "spoken": "2 to 3", "why": "a range, read out"}
+    assert tools.finish(item, "clean", [], [sub])["ok"]
+    out = runner.finalize(item)
+    assert out["action"] == "publish" and out["mp3"], out["reasons"]
+    assert '- "2-3" read as "2 to 3"' in out["notes"]
