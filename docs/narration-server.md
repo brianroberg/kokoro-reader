@@ -23,6 +23,8 @@ launchctl bootstrap gui/(id -u) ~/Library/LaunchAgents/net.robergb.narration.pli
 curl -s http://(tailscale ip -4):8770/health      # {"ok":true}
 ```
 
+The plist sets `HF_HUB_OFFLINE=1`, so the TTS model loads from the local Hugging Face cache, with no request to the hub at every record. Before the first start, record one sentence by hand, once for each voice the runner will use, so the model and the voice are in the cache: `echo "Hello there." | uv run python text_to_speech.py -o /tmp/hello.wav --voice af_heart`.
+
 Always sync with `uv sync --inexact`: the spaCy model `en_core_web_sm` comes from GitHub, not PyPI, so it is not in `uv.lock`, and a plain `uv sync` removes it (the second line installs it once, as the README does). With real engines the server exits at startup if the model is missing.
 
 (`(id -u)` is fish syntax. In bash, use `$(id -u)`, and `$(tailscale ip -4)` for the address.)
@@ -55,6 +57,7 @@ The server reads these from its environment (the plist's `EnvironmentVariables`)
 | `NARRATION_PORT` | `8770` | The port to listen on. |
 | `NARRATION_ALLOWED_HOSTS` | `127.0.0.1:PORT,localhost:PORT` | Comma-separated `host:port` values a request's `Host` header may have (the DNS-rebinding guard). A request with any other Host gets 421. |
 | `GEMINI_API_KEY` | none | The verifier's key, from the environment or `.env`. Not needed with `--fake-engines`. |
+| `HF_HUB_OFFLINE` | unset (the plist sets `1`) | Hugging Face's own setting: with `1`, the TTS model and voices load from the local cache only. |
 
 ## Never run it behind a root path
 

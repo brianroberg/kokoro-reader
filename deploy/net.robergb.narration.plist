@@ -19,6 +19,10 @@
   The spaCy model en_core_web_sm is installed outside uv.lock (it comes from GitHub, not
   PyPI). `uv run` below keeps it, but a plain `uv sync` removes it: update the checkout
   with `uv sync --inexact`. With real engines the server exits at startup without it.
+  HF_HUB_OFFLINE=1: every record loads the TTS model again, and this makes it load from
+  the local Hugging Face cache without asking the hub each time. So the model, and each
+  voice the runner asks for, must be in the cache before the server runs: record one
+  sentence by hand once per voice (docs/narration-server.md).
 -->
 <plist version="1.0"><dict>
   <key>Label</key><string>net.robergb.narration</string>
@@ -33,6 +37,7 @@
     <key>NARRATION_HOST</key><string>TAILNET_IP</string>
     <key>NARRATION_PORT</key><string>8770</string>
     <key>NARRATION_ALLOWED_HOSTS</key><string>TAILNET_IP:8770,brians-macbook-pro:8770</string>
+    <key>HF_HUB_OFFLINE</key><string>1</string>
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>

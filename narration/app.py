@@ -25,8 +25,9 @@ from mcp.server.mcpserver.exceptions import ToolError as SDKToolError
 from mcp.server.transport_security import TransportSecuritySettings
 
 from narration import agent_tools as rules
-from narration.agent_tools import (ISSUE_KINDS, MAX_EDIT_TEXT, MAX_FIELD, MAX_ISSUES, MAX_NOTE,
-                                   MAX_WORD, OUTCOMES, VOICE_RE, WHERE_RE, ToolError)
+from narration.agent_tools import (ISSUE_KINDS, MAX_CHECKS, MAX_EDIT_TEXT, MAX_FIELD, MAX_ISSUES,
+                                   MAX_NOTE, MAX_RECORDS, MAX_WORD, OUTCOMES, VOICE_RE, WHERE_RE,
+                                   ToolError)
 from narration.auth import BearerAuth, bearer
 from narration.words import MAX_SUBSTITUTIONS
 
@@ -38,8 +39,28 @@ AGENT_INSTRUCTIONS = (
     "override [word](/phonemes/) with exactly what it returned; never write phonemes by "
     "hand. If you look up a respelling of a word instead, declare it as a substitution "
     "(original: the word, spoken: the respelling). Record, read its speech_warnings, then "
-    "check: at most four record rounds and eight checks. The recorded text is hashed, so "
-    "after any replace_text, record again before check or finish. End with finish."
+    f"check: at most {MAX_RECORDS} record rounds and {MAX_CHECKS} checks. The recorded text "
+    "is hashed, so after any replace_text, record again before check or finish. End with "
+    "finish."
+)
+# The record and check tools' descriptions, with the limits agent_tools enforces.
+RECORD_DESCRIPTION = (
+    f"Generate audio from the prepared text as it is now. At most {MAX_RECORDS} rounds per "
+    "article; a round counts even if the engine fails. Refused once no checks are left, "
+    "since a new round could not be checked. Returns round, duration_seconds, records_left "
+    "and speech_warnings: places where the engine would say something the article doesn't "
+    "(or one entry saying nothing was compared, when the words differ from the article's: "
+    "finish compares those with your declared substitutions). Read speech_warnings before "
+    "spending a check: finish refuses the same mismatches, so fix them with replace_text "
+    "and record again. speed: 0.5 to 2.0."
+)
+# verify_audio.precheck_warnings: pace outside 100-250 WPM, or silences over 5 s.
+CHECK_DESCRIPTION = (
+    "Verify the latest recording against the prepared text; returns the verifier's report "
+    "and precheck_warnings: a pace outside 100-250 words per minute (audio cut short or "
+    "with extra content) and silences over 5 seconds. finish needs a check with no "
+    f"precheck_warnings. At most {MAX_CHECKS} checks per article, a failed one included. "
+    "Refused if the prepared text changed since the latest record: record again first."
 )
 
 # Literal over the tuples themselves: X[a, b] is X[(a, b)], so this is
@@ -136,25 +157,12 @@ def build_app(store, agent_tools, runner_tools, runner_token, allowed_hosts: lis
         text is hashed: after any replace_text, record again before check or finish."""
         return run(agent_tools.replace_text, item(ctx), old, new)
 
-    @agent.tool()
+    @agent.tool(description=RECORD_DESCRIPTION)
     def record(ctx: Context, voice: Voice = agent_tools.default_voice, speed: Speed = 1.0) -> dict:
-        """Generate audio from the prepared text as it is now. At most four rounds per
-        article; a round counts even if the engine fails. Refused once no checks are
-        left, since a new round could not be checked. Returns round,
-        duration_seconds, records_left and speech_warnings: places where the engine
-        would say something the article doesn't (or one entry saying nothing was
-        compared, when the words differ from the article's: finish compares those with
-        your declared substitutions). Read speech_warnings before spending a check:
-        finish refuses the same mismatches, so fix them with replace_text and record
-        again. speed: 0.5 to 2.0."""
         return run(agent_tools.record, item(ctx), voice, speed)
 
-    @agent.tool()
+    @agent.tool(description=CHECK_DESCRIPTION)
     def check(ctx: Context) -> dict:
-        """Verify the latest recording against the prepared text; returns the
-        verifier's report and precheck_warnings (truncation, long silences). At most
-        eight checks per article. Refused if the prepared text changed since the
-        latest record: record again first."""
         return run(agent_tools.check, item(ctx))
 
     @agent.tool()

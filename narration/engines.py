@@ -13,9 +13,11 @@ import threading
 from pathlib import Path
 from typing import Protocol
 
-# The MCP SDK runs sync tools in worker threads. The engine's model and the
-# misaki instance are each shared by the whole process, so one lock each keeps
-# two calls from using them at once.
+# The MCP SDK runs sync tools in worker threads, and one lock each keeps two calls
+# from running at once. text_to_speech.generate_audio loads the engine's model afresh
+# on every record (no model is shared between calls), and two loaded at once would
+# double the memory and compete for the GPU; the misaki instance is shared by the
+# whole process.
 _TTS_LOCK = threading.Lock()
 _G2P_LOCK = threading.Lock()
 

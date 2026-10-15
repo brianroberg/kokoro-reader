@@ -329,6 +329,42 @@ def test_the_agent_is_told_how_to_work(client):
     assert "not only add" in finish and "address" in finish  # what finish refuses (I2)
 
 
+def test_the_limits_in_the_prose_are_the_limits_enforced(client, monkeypatch):
+    import importlib
+    from narration import app as app_module
+    c, store = client
+    _, token = store.open("x", {})
+    tools = {name: t["description"] for name, t in _tools(c, "/agent/mcp", token).items()}
+    for text in (AGENT_INSTRUCTIONS, tools["record"], tools["check"]):
+        assert "four" not in text and "eight" not in text  # never spelled out apart
+    assert (f"at most {agent_tools.MAX_RECORDS} record rounds and {agent_tools.MAX_CHECKS} "
+            "checks") in AGENT_INSTRUCTIONS
+    assert f"At most {agent_tools.MAX_RECORDS} rounds per article" in tools["record"]
+    assert f"At most {agent_tools.MAX_CHECKS} checks per article" in tools["check"]
+    # Built from the constants: other limits, other prose.
+    monkeypatch.setattr(agent_tools, "MAX_RECORDS", 7)
+    monkeypatch.setattr(agent_tools, "MAX_CHECKS", 11)
+    try:
+        patched = importlib.reload(app_module)
+        assert "at most 7 record rounds and 11 checks" in patched.AGENT_INSTRUCTIONS
+        assert "At most 7 rounds per article" in patched.RECORD_DESCRIPTION
+        assert "At most 11 checks per article" in patched.CHECK_DESCRIPTION
+    finally:
+        monkeypatch.undo()
+        importlib.reload(app_module)
+
+
+def test_the_check_description_names_the_real_precheck_warnings(client):
+    import verify_audio
+    c, store = client
+    _, token = store.open("x", {})
+    check = " ".join(_tools(c, "/agent/mcp", token)["check"]["description"].split())
+    assert "pace outside 100-250 words per minute" in check and "silences over 5 seconds" in check
+    assert "truncation" not in check
+    # what verify_audio.precheck_warnings checks
+    assert "pace outside 100-250 WPM, or silences over 5 s" in verify_audio.precheck_warnings.__doc__
+
+
 def test_the_runner_is_told_when_to_force_and_what_status_returns(client):
     c, _ = client
     tools = {name: t["description"] for name, t in _tools(c, "/runner/mcp", RUNNER).items()}
