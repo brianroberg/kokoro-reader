@@ -863,7 +863,7 @@ def test_finish_refuses_a_text_the_engine_would_read_differently(tmp_path):
     item, _ = store.open("Costs fell 5% today.", {})
     tools.replace_text(item, "fell 5%", "fell ..-5%")  # the word check reads "5%"
     _record_and_check(tools, item)
-    with pytest.raises(ToolError, match=r"the engine would not say what the article says.*minus"):
+    with pytest.raises(ToolError, match=r"would not sound like the article.*minus"):
         tools.finish(item, "clean", [], [])
     assert store.load_state(item)["status"] == "open"
     assert tools.finish(item, "hold", [ISSUE], [])["ok"]  # hold needs no claims

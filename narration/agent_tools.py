@@ -406,10 +406,10 @@ class AgentTools:
         subs = [Substitution(s["original"], s["spoken"]) for s in subs_in]
         problems = speech_matches(self.g2p, source, prepared, subs)
         if problems:
-            advice = ("Make the prepared text read as the article does there (or declare the "
-                      f"change in substitutions), then record and check again; or {hold}."
-                      if n < MAX_RECORDS else f"No record rounds are left to fix it: {hold}.")
-            raise ToolError(f"{problems[0]}. {advice}")
+            # Not "declare it": the words agree, so a substitution can't (case is folded).
+            tail = (f"Then record and check again; or {hold}." if n < MAX_RECORDS
+                    else f"No record rounds are left to fix it: {hold}.")
+            raise ToolError(f"{problems[0]}. {tail}")
 
 
 def validate_finish(outcome, remaining_issues, substitutions) -> tuple[list[dict], list[dict]]:

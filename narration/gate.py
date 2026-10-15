@@ -35,6 +35,11 @@ from narration.words import _PHONETIC, Substitution, apply_with_reason, check, e
 # punctuation, pause marks and spaces are not compared.
 _MARKS = frozenset("ˈˌːˑ")
 _AROUND = 20  # phoneme characters shown on each side of a difference
+_NEAR = 3     # words of text quoted on each side of it
+# The advice for a difference where the words agree: the word check folds case, so a
+# substitution can't declare a case or spelling change the engine reads differently.
+OVERRIDE_ADVICE = ("The engine reads this differently; if it is a pronunciation change, use a "
+                   "phonetic override from phonemes() instead of changing case or spelling")
 
 
 @dataclass
@@ -129,21 +134,37 @@ def speech_matches(g2p, source: str, prepared: str, substitutions: list[Substitu
         if check(source, prepared, substitutions):  # it says where; this only says so
             why += " (the word check says where)"
         return [f"{why}, so what the engine would say could not be compared with the article"]
-    article_text = applied  # already as the engine reads it: not prepared a second time
-    said, heard = g2p.phonemes_for_text(engine_text(prepared)), g2p.phonemes_for_text(article_text)
+    prepared_text = engine_text(prepared)
+    # apply's result is already as the engine reads it: not prepared a second time
+    said, heard = g2p.phonemes_for_text(prepared_text), g2p.phonemes_for_text(applied)
     (a, a_at), (b, b_at) = _sounds(said), _sounds(heard)
     if a == b:
         return []
     d = len(os.path.commonprefix([a, b]))
     pa = a_at[d] if d < len(a_at) else len(said)
     pb = b_at[d] if d < len(b_at) else len(heard)
-    line = heard.count("\n", 0, pb)
-    lines = [text for text in re.split(r"\n+", article_text.strip()) if text.strip()]
-    begins = " ".join(_PHONETIC.sub(r"\1", lines[line]).split()[:8]) if line < len(lines) else ""
-    return [f"the engine would not say what the article says: in line {line + 1} of the article "
-            f"as read aloud (beginning {begins!r}), the prepared text sounds like "
-            f"'{_around(said, pa)}' where the article, with the declared substitutions, sounds "
-            f"like '{_around(heard, pb)}'"]
+    la, wa = _near(prepared_text, said, pa)
+    lb, wb = _near(applied, heard, pb)
+    return [f"the prepared text would not sound like the article: in line {la} of the prepared "
+            f"text, near {wa!r}, the engine would say '{_around(said, pa)}', where the article, "
+            f"with the declared substitutions (line {lb}, near {wb!r}), says "
+            f"'{_around(heard, pb)}'. {OVERRIDE_ADVICE}"]
+
+
+def _near(text: str, phonemes: str, at: int) -> tuple[int, str]:
+    """The line (from 1) of `text` that the phonemes at `at` were read from, and its
+    words around the word they belong to, overrides shown as their words. The word is
+    found by counting the phoneme words before it, so it is an estimate: a number or
+    a symbol can be read as several words, punctuation as none."""
+    line = phonemes.count("\n", 0, at)
+    lines = [part for part in re.split(r"\n+", text.strip()) if part.strip()]
+    if line >= len(lines):
+        return line + 1, ""
+    before = phonemes[phonemes.rfind("\n", 0, at) + 1:at]
+    index = len(before.split()) - (1 if before and not before[-1].isspace() else 0)
+    shown = _PHONETIC.sub(r"\1", lines[line]).split()
+    index = min(index, len(shown) - 1)
+    return line + 1, " ".join(shown[max(0, index - _NEAR):index + _NEAR + 1])
 
 
 def _sounds(phonemes: str) -> tuple[str, list[int]]:

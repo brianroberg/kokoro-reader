@@ -468,16 +468,21 @@ def test_a_sign_the_word_check_misses_fails_and_the_message_shows_where():
     assert check(COSTS, HOLE, []) == []  # the parked hole
     problems = speech_matches(SignG2P(), COSTS, HOLE, [])
     assert len(problems) == 1
-    assert "line 1 of the article" in problems[0] and "'Costs fell 5% today.'" in problems[0]
+    assert "in line 1 of the prepared text, near 'Costs fell ..-5% today." in problems[0]
+    assert "(line 1, near 'Costs fell 5% today.')" in problems[0]
     assert "minus" in problems[0]  # the prepared side's phonemes around the difference
     assert speech_matches(SignG2P(), COSTS, COSTS.replace("today", "-- today"), []) == []
 
 
-def test_the_message_names_the_line_of_the_difference():
-    article = "One line here.\n\nCosts fell 5% today, and the rest of a long line goes on."
-    problems = speech_matches(SignG2P(), article, article.replace("5%", "..-5%"), [])
-    assert "line 2 of the article" in problems[0]
-    assert "beginning 'Costs fell 5% today, and the rest of'" in problems[0]
+def test_the_message_quotes_the_words_nearest_the_difference_on_each_side():
+    long_line = ("Then the council met for an hour, and after a long debate costs fell 5% "
+                 "today, as the rest of a long line goes on and on.")
+    article = "One line here.\n\n" + long_line
+    prepared = "One line here.\n\n[BREAK]\n\n" + long_line.replace("5%", "..-5%")
+    problems = speech_matches(SignG2P(), article, prepared, [])
+    # three words each side of the word where the sounds part (a number can be several words)
+    assert "in line 2 of the prepared text, near 'debate costs fell ..-5% today, as the'" in problems[0]
+    assert "(line 2, near 'costs fell 5% today, as the rest')" in problems[0]
 
 
 def test_evaluate_holds_when_the_engine_would_say_something_else():
@@ -691,3 +696,28 @@ def test_the_article_side_reaches_the_g2p_as_apply_returns_it():
     subs = [Substitution("XIV", "the Fourteenth")]
     assert speech_matches(recording, article, prepared, subs) == []
     assert recording.texts == [engine_text(prepared), apply(article, prepared, subs)]
+
+
+
+# I3: a case-only edit can change what the engine says; the advice is an override
+class CaseG2P(FakeG2P):
+    """FakeG2P that spells a short all-capitals word letter by letter, as misaki says "AI"."""
+    def phonemes_for_text(self, text):
+        return super().phonemes_for_text(
+            re.sub(r"\b[A-Z]{2,3}\b", lambda m: " ".join("ˈ" + c.lower() for c in m.group()), text))
+
+
+def test_a_case_only_edit_the_engine_reads_differently_is_refused_with_override_advice(tmp_path):
+    store = WorkItemStore(tmp_path)
+    tools = AgentTools(store, FakeTTS(), FakeVerifier(), CaseG2P())
+    item, _ = store.open("Ai is here.", {})
+    tools.replace_text(item, "Ai", "AI")
+    assert check("Ai is here.", "AI is here.", []) == []  # case is folded
+    tools.record(item); tools.check(item)
+    with pytest.raises(ToolError) as refused:
+        tools.finish(item, "clean", [], [])
+    message = str(refused.value)
+    assert ("The engine reads this differently; if it is a pronunciation change, use a phonetic "
+            "override from phonemes() instead of changing case or spelling.") in message
+    assert "declare " not in message and "in substitutions" not in message  # no impossible advice
+    assert message.endswith("Then record and check again; or finish with outcome 'hold'.")
