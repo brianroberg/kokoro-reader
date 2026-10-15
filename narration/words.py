@@ -34,22 +34,36 @@ is "less five", "≤ -5" "less or equal to minus five"), even where misaki reads
 the two alike ("$.5" and "$ .5"). All tokens must match, in order, on both
 sides; only the silent punctuation the engine doesn't voice (SILENT) is free.
 
-The check takes time linear in its input. A prepared text far longer than the
-article, or with more words than the substitutions could add, is refused
-before any alignment, and a word of a substitution's spoken side or of an
-override is at most 64 characters.
+Bounds on the work. Cleaning and tokenizing take time linear in each text's
+length. Before any search, the check refuses a prepared text longer than twice
+the article plus 10,000 characters, more than MAX_SUBSTITUTIONS substitutions,
+an original longer than MAX_SPOKEN_WORDS words, and more prepared words (m)
+than the article's (n) plus added_words_limit(n). Then finding each original in
+the article takes at most n x MAX_SPOKEN_WORDS comparisons, and the alignment
+settles at most 50 x (n + m) + 1000 states, each against at most
+MAX_SUBSTITUTIONS substitutions found beforehand (a little under a millisecond
+per article word in the worst case measured). A word of a substitution's spoken
+side or of an override is at most 64 characters, and only words of at most 64
+letters are compared as respellings.
 
 Accepted residuals, where misaki and the check still differ:
-- misaki drops a minus glued after "+ × % @ § © ∞ ~ = < ^ ‰" (and after a comma
-  glued to a word, "rose,-5"), where the check keeps it: "5" to "<-5" is refused
-  though it sounds the same, while "-5" to "<-5", "×-5" to "× -5" and "rose, -5"
-  to "rose,-5" pass though misaki says "minus" in only one of each;
+- misaki deletes a minus glued after "+ × % @ § © ∞ ~ = < ^ ‰ _ ` – >", after a
+  run of apostrophes, and after a comma glued to a word or a digit ("rose,-5",
+  "5,-6"), where the check keeps it: "5" to "<-5" is refused though it sounds
+  the same, while a minus deleted that way passes ("-5" to "<-5", "fell -5" to
+  "fell_-5", "×-5" to "× -5", "rose, -5" to "rose,-5");
+- the other way, dots before a sign and a quote between the sign and the digits
+  make misaki say a minus the check doesn't see ("..-5" and "-‘5" read "minus
+  five", here "5"), or drop the number;
+- dashes in a run with a currency sign: "$5-6" reads "five dollarssix" and
+  "$5–6" "five six", the same token here; the review found "5$-" can add a
+  "dollar" that "5$" lacks, also the same token here;
 - misaki sometimes drops a "-5" entirely (after a quote, a colon or an em dash);
 - zero-width characters: misaki reads some as spaces ("five\u200bdollars" is
   "five dollars"); here they are symbols, so edits around them are refused;
 - "No." before a newline reads "no" (misaki reads each line on its own), and a
-  lowercase "no." before a number reads "number" ("no. 3"); both are taken here
-  as their spelling says;
+  lowercase "no." before a number reads "number" ("no. 3"), while here "No." is
+  always "no." and "no." always "no" (DOTTED_ABBREVIATIONS is case-sensitive);
 - URLs: paths, ports and "@" ("example.com/news" has no "dot") are not modelled;
 - "'05" ("zero five") and "’05" ("five") are the same token here;
 - case is folded, though a case change can change the speech ("us" and "US",
@@ -58,7 +72,6 @@ Accepted residuals, where misaki and the check still differ:
 - a silent mark glued to a year can switch misaki from "twenty twenty-three" to
   "two thousand twenty-three";
 - misaki garbles "-$3.50" and ranges such as "10,000-20,000";
-- an override next to a currency sign ("$[5](/fˈIv/)") loses the currency word;
 - override phonemes are not checked to say their word until Task 4's
   provenance rule.
 And the check refuses some edits the engine reads the same way (a sentence-final
@@ -66,8 +79,10 @@ And the check refuses some edits the engine reads the same way (a sentence-final
 symbol), since a refusal only costs a retry.
 
 A phonetic override is validated for shape (one displayed word, a pronunciation
-with a letter, no whitespace, limited length) and must stand apart from the
-words around it, but its phonemes are not checked to say that word: an override
+with a letter, no whitespace, limited length) and must stand alone, a whole,
+separately spaced word with at most an opening bracket or quote before it and
+closing punctuation after it, since misaki misplaces one that shares a token
+with anything else. Its phonemes are not checked to say that word: an override
 can pronounce any single word. The server validates override provenance
 separately (Task 4).
 
@@ -135,6 +150,11 @@ _ABBREVIATION = "|".join(re.escape(a[:-1])
 _TOKEN = re.compile(rf"{_NUMBER.pattern}|{_WORD}(?:\.{_WORD})+|(?:{_ABBREVIATION})\.(?![^\W_])"
                     rf"|{_WORD}|\S")
 _SIGNS = ("-.", "-", ".")  # what may stand right before a number's digits, longest first
+# What may touch a phonetic override: an opening bracket or quote before its "[", and
+# closing marks after its ")", then whitespace. Anything else glued to it lands in the
+# same spaCy token, and misaki then puts the override on the wrong word.
+_BEFORE_OVERRIDE = frozenset("([{\"“‘'")
+_AFTER_OVERRIDE = frozenset(".,;:!?)]}\"”’'")
 _WORD_CHAR = re.compile(r"[^\W_]")
 _DIGIT_APOSTROPHE = re.compile(r"(?<=\d)'|'(?=\d)")
 
@@ -194,19 +214,24 @@ def _run_tokens(run: str) -> list[str]:
     return tokens
 
 
-def _tokens(text: str) -> list[str]:
-    """Case-folded tokens of already-cleaned text, silent punctuation dropped. An
-    apostrophe next to a digit goes, as misaki drops it ("5'6" says "fifty-six").
-    A run with a symbol in it is one token (_merge)."""
+def _tokens_shown(text: str) -> list[tuple[str, str]]:
+    """Case-folded tokens of already-cleaned text, silent punctuation dropped, each
+    with how a message shows it. An apostrophe next to a digit goes, as misaki drops
+    it ("5'6" says "fifty-six"). A run with a symbol in it is one token (_merge),
+    shown as written, so a message can show the spacing that differs."""
     out = []
     for run in text.split():
         tokens = [_DIGIT_APOSTROPHE.sub("", tok).casefold()
                   for tok in _run_tokens(run) if tok not in SILENT]
         if any(_is_symbol(ch) for ch in run):
-            out.append(_merge(tokens))
+            out.append((_merge(tokens), run.casefold()))
         else:
-            out.extend(tokens)
+            out.extend((tok, tok) for tok in tokens)
     return out
+
+
+def _tokens(text: str) -> list[str]:
+    return [tok for tok, _ in _tokens_shown(text)]
 
 
 def _merge(tokens: list[str]) -> str:
@@ -223,9 +248,10 @@ def _merge(tokens: list[str]) -> str:
     return merged
 
 
-def _words_of(spoken: str) -> list[str]:
-    """words() of text already through _spoken_text."""
-    return _tokens(_PHONETIC.sub(r"\1", spoken))
+def _words_of(spoken: str) -> tuple[list[str], list[str]]:
+    """words() of text already through _spoken_text, and how messages show them."""
+    pairs = _tokens_shown(_PHONETIC.sub(r"\1", spoken))
+    return [tok for tok, _ in pairs], [shown for _, shown in pairs]
 
 
 def words(text: str) -> list[str]:
@@ -237,7 +263,7 @@ def words(text: str) -> list[str]:
     can change what misaki reads ("--5" says "five", "No -- 5" says "number
     five"). A phonetic override reduces to its displayed word.
     """
-    return _words_of(_spoken_text(text))
+    return _words_of(_spoken_text(text))[0]
 
 
 def check(source: str, prepared: str, substitutions: list[Substitution]) -> list[str]:
@@ -245,8 +271,10 @@ def check(source: str, prepared: str, substitutions: list[Substitution]) -> list
     if len(prepared) > 2 * len(source) + 10_000:
         return [f"the prepared text is far longer than the article: {len(prepared)} "
                 f"characters against {len(source)}"]
+    if len(substitutions) > MAX_SUBSTITUTIONS:
+        return [_too_many(substitutions)]
     spoken = _spoken_text(prepared)
-    src, prep = words(source), _words_of(spoken)
+    (src, src_shown), (prep, prep_shown) = _words_of(_spoken_text(source)), _words_of(spoken)
     limit = added_words_limit(len(src))
     if len(prep) > len(src) + limit:
         return [f"the prepared text has {len(prep)} words against the article's {len(src)}; "
@@ -261,25 +289,37 @@ def check(source: str, prepared: str, substitutions: list[Substitution]) -> list
         return problems + ["could not align the prepared text with the article "
                            "(too many alternatives)"]
     if isinstance(aligned, _Stuck):
-        return problems + [_describe(src, prep, pairs, aligned)]
+        return problems + [_describe(src, prep, pairs, aligned, (src_shown, prep_shown))]
     return problems + _check_budgets(src, substitutions, pairs, aligned)
+
+
+def _stands_alone(spoken: str, start: int, end: int) -> bool:
+    """Whether the override at spoken[start:end] is a word of its own: whitespace (or
+    the start) or an opening bracket or quote before it, and after it closing marks,
+    if any, then whitespace or the end. misaki reads '(x)', '"x",', 'x.', 'x...' (what
+    prepare_for_tts makes of "x --") and 'x?!' with the override in place."""
+    if start and not spoken[start - 1].isspace() and spoken[start - 1] not in _BEFORE_OVERRIDE:
+        return False
+    while end < len(spoken) and spoken[end] in _AFTER_OVERRIDE:
+        end += 1
+    return end == len(spoken) or spoken[end].isspace()
 
 
 def _check_overrides(spoken: str) -> list[str]:
     """Each phonetic override is one displayed word with one bounded pronunciation,
-    standing apart from the words around it: misaki's tokenizer misplaces an override
-    glued to a word ("Pengel[ley](/lˈA/) family" loses "family", "[Mc](/mək/)Donald"
-    loses "Donald") or to a sign before a number ("-[5](/fˈIv/) now" loses "now")."""
+    standing alone: misaki misplaces an override that shares a spaCy token with
+    anything else ("Pengel[ley](/lˈA/) family" loses "family", "-[is](/ɪz/) not"
+    loses "not", "[Covid](/kˈOvɪd/)-19" loses "19", "[1](/wˈʌn/),000" loses
+    "thousand"), and every later override on the line then shifts."""
     problems = []
     for m in _PHONETIC.finditer(spoken):
         shown, phonemes = m.group(1).strip(), m.group(2).strip("/")  # as the engine reads it
         why = []
-        if m.start() and _is_word_char(spoken, m.start() - 1):
-            why.append("it is glued to the word before it")
-        if m.end() < len(spoken) and _is_word_char(spoken, m.end()):
-            why.append("it is glued to the word after it")
-        if m.start() and spoken[m.start() - 1] in "-." and shown[:1].isdigit():
-            why.append(f"a {spoken[m.start() - 1]!r} is glued before the number it shows")
+        if not _stands_alone(spoken, m.start(), m.end()):
+            why.append("it is glued to the text around it; an override must be a whole, "
+                       "separately spaced word, with at most an opening bracket or quote "
+                       "before it and closing punctuation after it (override a possessive "
+                       "whole, as [Pengelley's](/…/))")
         shown_words = _tokens(shown)
         if len(shown_words) != 1:
             why.append("the displayed text must be exactly one word")
@@ -301,10 +341,14 @@ def _check_overrides(spoken: str) -> list[str]:
     return problems
 
 
+def _too_many(subs: list[Substitution]) -> str:
+    return f"{len(subs)} substitutions declared; the limit is {MAX_SUBSTITUTIONS}"
+
+
 def _check_substitutions(src: list[str], subs: list[Substitution]) -> list[str]:
+    if len(subs) > MAX_SUBSTITUTIONS:  # before reading any of them
+        return [_too_many(subs)]
     problems = []
-    if len(subs) > MAX_SUBSTITUTIONS:
-        problems.append(f"{len(subs)} substitutions declared; the limit is {MAX_SUBSTITUTIONS}")
     for s in subs:
         o, sp = words(s.original), words(s.spoken)
         label = f"substitution {s.original!r} -> {s.spoken!r}"
@@ -321,7 +365,7 @@ def _check_substitutions(src: list[str], subs: list[Substitution]) -> list[str]:
         if len(sp) > MAX_SPOKEN_WORDS or len(sp) > len(o) + MAX_EXTRA_WORDS:
             problems.append(f"{label} is too long: at most {MAX_SPOKEN_WORDS} spoken words, "
                             f"and at most {MAX_EXTRA_WORDS} more than the original")
-        if not _contains(src, o):
+        if len(o) <= MAX_SPOKEN_WORDS and not _contains(src, o):  # a longer one is refused above
             problems.append(f"{label}: the original does not appear in the article")
     return problems
 
@@ -521,9 +565,10 @@ def _explained_at(src, prep, pairs, i, j) -> bool:
     return _substitution_at(src, prep, pairs, i, j)
 
 
-def _describe(src, prep, pairs, stuck, context=3, window=_RESYNC_WINDOW):
+def _describe(src, prep, pairs, stuck, shown, context=3, window=_RESYNC_WINDOW):
     """The first span that no equal word or declared substitution explains, ending
-    where the texts agree again, with a few plain words of context each side."""
+    where the texts agree again, with a few plain words of context each side.
+    `shown` holds how each text's words appear in the message."""
     i, j = stuck.i, stuck.j
     span = None
     for total in range(1, 2 * window + 1):
@@ -537,16 +582,17 @@ def _describe(src, prep, pairs, stuck, context=3, window=_RESYNC_WINDOW):
             break
     truncated = span is None
     a, b = span or (min(window, len(src) - i), min(window, len(prep) - j))
-    before = src[i - min(context, stuck.plain):i]
+    src_shown, prep_shown = shown
+    before = src_shown[i - min(context, stuck.plain):i]
     after = []
     p, q = i + a, j + b
     while (len(after) < context and p < len(src) and q < len(prep) and src[p] == prep[q]
            and not _substitution_at(src, prep, pairs, p, q)):
-        after.append(src[p])
+        after.append(src_shown[p])
         p, q = p + 1, q + 1
-    return (f"near word {max(1, min(i + 1, len(src)))} of the article: "
-            f"the article reads '{_excerpt(before, src[i:i + a], after, truncated)}' "
-            f"but the prepared text reads '{_excerpt(before, prep[j:j + b], after, truncated)}'")
+    return (f"near word {max(1, min(i + 1, len(src)))} of the article: the article reads "
+            f"'{_excerpt(before, src_shown[i:i + a], after, truncated)}' but the prepared "
+            f"text reads '{_excerpt(before, prep_shown[j:j + b], after, truncated)}'")
 
 
 def _excerpt(before, span, after, truncated):

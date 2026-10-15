@@ -614,11 +614,52 @@ def test_an_override_glued_to_a_word_or_a_sign_is_refused(article, prepared, ove
     assert any(override in p and "glued" in p for p in problems)
 
 
+@pytest.mark.parametrize("article, prepared, override", [
+    ("He is not guilty.", "He -[is](/ɪz/) not guilty.", "[is](/ɪz/)"),  # ɪz ɪz ɡɪlti
+    ("We used Qwen-2 today.", "We used [Qwen](/ʧwˈɛn/)-2 today.", "[Qwen](/ʧwˈɛn/)"),  # "2" gone
+    ("We used GPT-4 today.", "We used [GPT](/ʤˈipitˈi/)-4 today.", "[GPT](/ʤˈipitˈi/)"),
+    ("During Covid-19 we left.", "During [Covid](/kˈOvɪd/)-19 we left.",
+     "[Covid](/kˈOvɪd/)"),                                                     # "19" gone
+    ("It cost 1,000 dollars.", "It cost [1](/wˈʌn/),000 dollars.", "[1](/wˈʌn/)"),  # no 1000
+    ("See Pengelley.com now.", "See [Pengelley](/pɛnʤˈɛli/).com now.",
+     "[Pengelley](/pɛnʤˈɛli/)"),                                               # ".com" gone
+    ("Ask @Pengelley not me.", "Ask @[Pengelley](/pɛnʤˈɛli/) not me.",
+     "[Pengelley](/pɛnʤˈɛli/)"),                                               # "not" gone
+    ("Ask Pengelley's dog.", "Ask [Pengelley](/pɛnʤˈɛli/)'s dog.",
+     "[Pengelley](/pɛnʤˈɛli/)"),                                     # pɛnʤɛlis, not pɛnʤɛliz
+])
+def test_an_override_that_does_not_stand_alone_is_refused(article, prepared, override):
+    problems = check(article, prepared, [])
+    assert any(override in p and "separately spaced word" in p and "[Pengelley's](/" in p
+               for p in problems)
+
+
 @pytest.mark.parametrize("article, prepared", [
     ("He said 'Pengelley' loudly.", "He said '[Pengelley](/pɛnʤˈɛli/)' loudly."),  # pɛnʤɛli lWdli
     ("It is (5) now.", "It is ([5](/fˈIv/)) now."),                                 # fIv nW
+    ("Ask (Pengelley) now.", "Ask ([Pengelley](/pɛnʤˈɛli/)) now."),                 # pɛnʤɛli nW
+    ('Ask "Pengelley," now.', 'Ask "[Pengelley](/pɛnʤˈɛli/)," now.'),
+    ("Ask Pengelley.", "Ask [Pengelley](/pɛnʤˈɛli/)."),
+    ("Ask {Pengelley} now.", "Ask {[Pengelley](/pɛnʤˈɛli/)} now."),
+    ("Ask “Pengelley” now.", "Ask “[Pengelley](/pɛnʤˈɛli/)” now."),
+    ("Ask Pengelley's dog.", "Ask [Pengelley's](/pɛnʤˈɛliz/) dog."),               # pɛnʤɛliz dɔɡ
 ])
-def test_an_override_inside_quotes_or_brackets_is_fine(article, prepared):
+def test_an_override_standing_alone_is_fine(article, prepared):
+    assert check(article, prepared, []) == []
+
+
+@pytest.mark.parametrize("article, prepared", [
+    # misaki reads each with the override in place ("pɛnʤɛli nW ænd smɪθ"); " --"
+    # becomes "... " after prepare_for_tts, glued to the ")".
+    ("Ask Pengelley now and Smith.",
+     "Ask [Pengelley](/pɛnʤˈɛli/) -- now and [Smith](/smˈɪθ/)."),
+    ("Ask Pengelley now and Smith.",
+     "Ask [Pengelley](/pɛnʤˈɛli/)?! Now and [Smith](/smˈɪθ/)."),
+    ("Ask Pengelley now and Smith.",
+     "Ask [Pengelley](/pɛnʤˈɛli/)), now and [Smith](/smˈɪθ/)."),
+    ("Ask Pengelley.\n\n5 now.", "Ask [Pengelley](/pɛnʤˈɛli/).\n\n--5 now."),  # ")....  5"
+])
+def test_an_override_followed_by_closing_marks_is_fine(article, prepared):
     assert check(article, prepared, []) == []
 
 
@@ -667,6 +708,23 @@ def test_long_runs_are_checked_in_linear_time(make):
     start = time.perf_counter()
     check(text, text, [])
     assert time.perf_counter() - start < 5
+
+
+def test_too_many_substitutions_are_refused_before_any_search():
+    article = " ".join(["word"] * 10_000)
+    subs = [Substitution(f"missing{i}", "something else") for i in range(10_000)]
+    start = time.perf_counter()
+    problems = check(article, article, subs)
+    assert time.perf_counter() - start < 0.1   # refused before reading either text
+    assert problems == ["10000 substitutions declared; the limit is 25"]
+
+
+def test_a_merged_run_is_shown_as_written_in_messages():
+    # Both runs read "fell 5%" as tokens; the message shows the spacing that differs.
+    problems = check("Costs fell(5%) today.", "Costs fell (5%) today.", [])
+    assert len(problems) == 1
+    assert "'costs [fell(5%)] today'" in problems[0]
+    assert "'costs [fell (5%)] today'" in problems[0]
 
 
 # ---- respellings are capped too ----
@@ -865,6 +923,8 @@ def _glued_overrides(w):
              + [f"[{w[:j]}](/fəˈnɛt/){w[j:]}" for j in cuts])
     if w[:1] in "-." and w[1:2].isdigit():
         forms.append(f"{w[0]}[{w[1:]}](/fəˈnɛt/)")
+    # and the whole word with a mark glued before it, or a number after it
+    forms += [f"{mark}[{w}](/fəˈnɛt/)" for mark in "-.,@/"] + [f"[{w}](/fəˈnɛt/)-19"]
     return forms
 
 
