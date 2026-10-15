@@ -45,11 +45,41 @@ class GateResult:
     notes: str = ""
 
 
+_TEXT_FIELDS = ("title", "publication", "issue_number", "issue_season", "date_published",
+                "description")
+
+
+def _text(value) -> str:
+    """A metadata field as text: a string (stripped), a number as written, else ""."""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return str(value)
+    return ""
+
+
+def _meta(metadata) -> dict:
+    """The metadata as the notes, the MP3 tags and status read it, whatever shape
+    article-assistant gave it: each text field a string ("" when missing, null or not
+    text), and authors a list of non-empty strings (a lone string is one author;
+    null, empty and non-text entries are dropped)."""
+    if not isinstance(metadata, dict):
+        metadata = {}
+    authors = metadata.get("authors")
+    if isinstance(authors, str):
+        authors = [authors]
+    authors = [a.strip() for a in authors if isinstance(a, str) and a.strip()] \
+        if isinstance(authors, list) else []
+    return {**{k: _text(metadata.get(k)) for k in _TEXT_FIELDS}, "authors": authors}
+
+
 def album_for(metadata: dict) -> str:
-    pub = metadata.get("publication", "")
-    if metadata.get("issue_number") and metadata.get("issue_season"):
-        return f"{pub}, No. {metadata['issue_number']} ({metadata['issue_season']})"
-    return pub
+    """"<publication>, No. <n> (<season>)", or just the publication when there's no
+    edition."""
+    meta = _meta(metadata)
+    edition = (f"No. {meta['issue_number']} ({meta['issue_season']})"
+               if meta["issue_number"] and meta["issue_season"] else "")
+    return ", ".join(part for part in (meta["publication"], edition) if part)
 
 
 def notes_for(metadata: dict, finish: dict) -> str:
@@ -62,7 +92,7 @@ def notes_for(metadata: dict, finish: dict) -> str:
     existed) is left out."""
     issues = _valid(_issue, finish.get("remaining_issues"))
     subs = _valid(_substitution, finish.get("substitutions"))
-    parts = [metadata.get("description", "").strip()]
+    parts = [_meta(metadata)["description"]]
     if issues:
         parts.append("Known issues in this recording:")
         parts += [f"- {i['where']} {i['kind']}" for i in issues]

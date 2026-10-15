@@ -6,7 +6,7 @@ import json
 import os
 
 from narration.agent_tools import ToolError, _checks_used, _sha256
-from narration.gate import album_for, evaluate
+from narration.gate import _meta, album_for, evaluate
 
 
 class RunnerTools:
@@ -19,6 +19,10 @@ class RunnerTools:
             raise ToolError("article_text must be a non-empty string")
         if not isinstance(metadata, dict):
             raise ToolError("metadata must be an object")
+        try:  # the store writes it as JSON; refuse before it creates anything
+            json.dumps(metadata, allow_nan=False)
+        except (TypeError, ValueError) as e:
+            raise ToolError(f"metadata must be JSON: {e}") from e
         item_id, token = self.store.open(article_text, metadata)
         return {"item_id": item_id, "agent_token": token}
 
@@ -30,7 +34,8 @@ class RunnerTools:
             return {"exists": False}
         state = self.store.load_state(item_id)
         prepared = self.store.read_text(item_id, "prepared.md")
-        return {"exists": True, "status": state["status"], "records": state["records"],
+        meta = _meta(json.loads(self.store.read_text(item_id, "metadata.json")))
+        return {"exists": True, "metadata": meta, "status": state["status"], "records": state["records"],
                 "recorded_round": state["recorded_round"], "checks_used": _checks_used(state),
                 "checks": len(state["checks"]),
                 "prepared_matches_recording": _sha256(prepared) == state.get("recorded_sha256"),
@@ -66,11 +71,11 @@ class RunnerTools:
         conversion has succeeded, so a later finalize never takes a partial file for a
         finished one."""
         tmp = mp3.with_name(".tmp-episode.mp3")
+        tags = _meta(meta)
         try:
             self.converter.to_mp3(self.store.path(item_id, "recording.wav"), tmp,
-                                  title=meta.get("title", ""),
-                                  artist="; ".join(meta.get("authors", [])),
-                                  album=album_for(meta))
+                                  title=tags["title"], artist="; ".join(tags["authors"]),
+                                  album=album_for(tags))
             os.replace(tmp, mp3)
         finally:
             tmp.unlink(missing_ok=True)

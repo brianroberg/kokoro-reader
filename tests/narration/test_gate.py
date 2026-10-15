@@ -589,3 +589,63 @@ def test_notes_drop_an_issue_an_old_record_got_wrong():
                                    {"kind": "<i>", "where": "1:10", "note": ""}, ISSUE]}
     notes = notes_for(META, finish)
     assert "<" not in notes and "- 1:10 pacing" in notes and notes.count("\n- ") == 1
+
+
+# I1: metadata in every shape article-assistant documents
+EMPTY_META = {"title": "", "authors": [], "publication": "", "issue_number": "",
+              "issue_season": "", "date_published": "", "description": ""}
+
+
+@pytest.mark.parametrize("metadata, expected", [
+    ({}, {}),
+    ([], {}),  # not even an object
+    ({"description": None, "authors": None, "title": None, "issue_number": None}, {}),
+    ({"authors": []}, {}),
+    ({"authors": "Joseph Lawler"}, {"authors": ["Joseph Lawler"]}),
+    ({"authors": ["A", None, "", "  ", 5, " B "]}, {"authors": ["A", "B"]}),
+    ({"authors": {"name": "A"}}, {}),
+    ({"issue_number": 86, "issue_season": "Fall 2026"},
+     {"issue_number": "86", "issue_season": "Fall 2026"}),
+    ({"issue_number": True, "title": ["x"], "date_published": {"y": 1}}, {}),
+    ({"title": " Zoning Alone ", "description": 7}, {"title": "Zoning Alone", "description": "7"}),
+])
+def test_meta_reads_each_documented_shape(metadata, expected):
+    assert gate._meta(metadata) == {**EMPTY_META, **expected}
+
+
+@pytest.mark.parametrize("changes, artist, album, first_line", [
+    ({"description": None, "authors": None}, "", "The New Atlantis, No. 86 (Fall 2026)",
+     "Recorded automatically."),
+    ({"authors": ["Joseph Lawler", None]}, "Joseph Lawler", "The New Atlantis, No. 86 (Fall 2026)",
+     "Zoning made us lonely."),
+    ({"authors": "Joseph Lawler"}, "Joseph Lawler", "The New Atlantis, No. 86 (Fall 2026)",
+     "Zoning made us lonely."),
+    ({"authors": ["A", "B"], "issue_number": 86}, "A; B", "The New Atlantis, No. 86 (Fall 2026)",
+     "Zoning made us lonely."),
+    ({"issue_number": None, "issue_season": None}, "Joseph Lawler", "The New Atlantis",
+     "Zoning made us lonely."),
+    ({"publication": None, "title": None}, "Joseph Lawler", "No. 86 (Fall 2026)",
+     "Zoning made us lonely."),
+])
+def test_finalize_publishes_whatever_shape_the_metadata_has(tmp_path, changes, artist, album,
+                                                            first_line):
+    store, conv = WorkItemStore(tmp_path), FakeConverter()
+    runner = RunnerTools(store, conv, FakeG2P())
+    tools = AgentTools(store, FakeTTS(), FakeVerifier(), FakeG2P())
+    item = runner.open(ARTICLE, {**META, **changes})["item_id"]
+    tools.record(item); tools.check(item); tools.finish(item, "clean", [], [])
+    out = runner.finalize(item)
+    assert out["action"] == "publish" and out["mp3"]
+    assert conv.calls[0][1:] == (artist, album)
+    assert out["notes"].splitlines()[0] == first_line
+    assert runner.status(item)["metadata"] == gate._meta({**META, **changes})
+
+
+@pytest.mark.parametrize("metadata", [{"x": object()}, {"x": float("nan")}, {"x": {1, 2}},
+                                      {"x": b"bytes"}])
+def test_open_refuses_metadata_that_is_not_json_before_touching_the_store(tmp_path, metadata):
+    store = WorkItemStore(tmp_path)
+    runner = RunnerTools(store, FakeConverter(), FakeG2P())
+    with pytest.raises(ToolError, match="metadata must be JSON"):
+        runner.open(ARTICLE, metadata)
+    assert list((tmp_path / "items").iterdir()) == []
