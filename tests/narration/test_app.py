@@ -327,6 +327,11 @@ def test_the_agent_is_told_how_to_work(client):
     assert "respelling" in tools["finish"]
     finish = " ".join(tools["finish"].split())
     assert "not only add" in finish and "address" in finish  # what finish refuses (I2)
+    # Brian, 2026-11-10: only gross errors block publication.
+    assert ("hold (only for a gross error: a sentence or more missing or out of place, invented "
+            "text the article doesn't have, or a stretch a listener can't follow; not published)") in finish
+    record = " ".join(tools["record"].split())
+    assert "an override in the wrong form" in record and "no round is used" in record
 
 
 def test_the_limits_in_the_prose_are_the_limits_enforced(client, monkeypatch):

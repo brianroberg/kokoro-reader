@@ -49,10 +49,13 @@ RECORD_DESCRIPTION = (
     "article; a round counts even if the engine fails. Refused once no checks are left, "
     "since a new round could not be checked. Returns round, duration_seconds, records_left "
     "and speech_warnings: places where the engine would say something the article doesn't "
-    "(or one entry saying nothing was compared, when the words differ from the article's: "
-    "finish compares those with your declared substitutions). Read speech_warnings before "
-    "spending a check: finish refuses the same mismatches, so fix them with replace_text "
-    "and record again. speed: 0.5 to 2.0."
+    "(or, when the words differ from the article's, an entry saying nothing was compared "
+    "and then where they first differ: finish compares those with your declared "
+    "substitutions). Read speech_warnings before spending a check: finish refuses the same "
+    "mismatches, so fix them with replace_text and record again. A text with an override "
+    "in the wrong form (glued to the text around it, more than one word, a [BREAK] inside, "
+    "bad phonemes) is refused, and no round is used; finish still checks where an "
+    "override's phonemes came from. speed: 0.5 to 2.0."
 )
 # verify_audio.precheck_warnings: pace outside 100-250 WPM, or silences over 5 s.
 CHECK_DESCRIPTION = (
@@ -186,8 +189,10 @@ def build_app(store, agent_tools, runner_tools, runner_token, allowed_hosts: lis
                substitutions: Annotated[list[Substitution],
                                         Field(max_length=MAX_SUBSTITUTIONS)] = []) -> dict:
         """End the session; your token stops working. outcome: clean (no remaining
-        issues), minor (small issues) or hold (content missing or garbled; not
-        published); minor and hold list at least one remaining issue. clean and minor
+        issues), minor (smaller issues, once a fix was tried) or hold (only for a gross
+        error: a sentence or more missing or out of place, invented text the article
+        doesn't have, or a stretch a listener can't follow; not published); minor and
+        hold list at least one remaining issue. clean and minor
         need the latest round recorded from the prepared text as it is now, and
         checked with no pre-check warnings. While two or more record rounds and checks
         are left, minor that lists a mispronunciation needs a round recorded after the

@@ -43,9 +43,29 @@ def test_prompt_outcomes_follow_the_spec(text):
     assert "nothing you would address or note" in outcome_line(text, "clean")
     minor = outcome_line(text, "minor")
     assert "likely ignore" in minor and "couldn't fix" in minor and "`remaining_issues`" in minor
-    hold = outcome_line(text, "hold")  # R24a: the spec's "garbled" includes speech the article doesn't have
-    assert "only for content that is missing, extra" in hold and "or garbled" in hold
     assert "noise" not in text
+
+
+def test_prompt_holds_only_for_gross_errors(text):
+    # Brian, 2026-11-10: "Let's only block publication for gross errors like a sentence
+    # (or more) of missing or misplaced text, hallucinated text, or degradation of
+    # intelligibility." and "There should still be a correction pass to attempt to fix
+    # smaller problems, but smaller problems shouldn't block publication." This replaces
+    # the spec's hold rule (R24a: any content missing, extra or garbled).
+    hold = outcome_line(text, "hold")
+    # Review F3: "hallucinated text" is invented text; a repeated word is smaller.
+    assert ("only for a gross error you couldn't fix: a sentence or more missing or out of "
+            "place, invented text the article doesn't have, or a stretch a listener can't "
+            "follow") in hold
+    minor = outcome_line(text, "minor")
+    assert ("Everything smaller is `minor` once you've tried to fix it, never `hold`: "
+            "mispronunciations, a few words left out, a repeated word, pacing, artifacts and a "
+            "clipped word") in minor
+
+
+def test_prompt_omission_is_less_than_a_sentence(text):
+    kinds = next(line for line in text.splitlines() if line.startswith("Each remaining issue has a `kind`"))
+    assert "`omission`, words left out, less than a sentence" in kinds
 
 
 def test_prompt_spells_out_abbreviations_beside_roman_numerals(text):
@@ -105,3 +125,22 @@ def test_prompt_asks_for_each_issue_under_its_own_kind(text):
     kinds = next(line for line in text.splitlines() if line.startswith("Each remaining issue has a `kind`"))
     assert ("Give each issue the kind it is, even when that means another round: the episode "
             "notes tell listeners what to expect.") in kinds
+
+
+def test_prompt_says_record_refuses_a_broken_override(text):
+    # narration's record refuses it before the round is spent (agent_tools.record), so a
+    # session isn't surprised; "Zoning Alone" (2026-11-10) was held over one at finish.
+    # Review F1: record checks only the overrides' form; finish also checks where their
+    # phonemes came from and how the engine reads them, so the rule says which.
+    [rule] = [l for l in text.splitlines()
+              if l.startswith("- **`record` refuses an override in the wrong form.**")]
+    assert "glued to the text around it" in rule and "no round is used" in rule
+    assert "`finish` still checks the rest" in rule
+
+
+def test_prompt_says_record_names_only_the_first_word_change(text):
+    # Review F2: the word check stops at the first place the words differ, which may be
+    # a change the session means to declare, shown loosely (a word read as "(nothing)").
+    [rule] = [l for l in text.splitlines() if l.startswith("- **Read `speech_warnings`.**")]
+    assert ("only the first difference is named, and a change you mean to declare shows there "
+            "until `finish`") in rule

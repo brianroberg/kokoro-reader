@@ -478,6 +478,14 @@ def is_override_respelling(shown: str, spoken: str, names: frozenset[str]) -> bo
             >= NAME_RESPELLING_RATIO)
 
 
+def override_problems(prepared: str) -> list[str]:
+    """The phonetic overrides in `prepared` that the word check refuses whatever is
+    declared (_check_overrides: glued to the text around it, more than one word, a
+    [BREAK] inside, phonemes empty or malformed), as check() words them; [] when none."""
+    with_breaks = _with_breaks(prepared)
+    return _check_overrides(with_breaks.replace(_BREAK, " "), _break_positions(with_breaks))
+
+
 def check(source: str, prepared: str, substitutions: list[Substitution]) -> list[str]:
     """Problems with `prepared` as a faithful reading of `source`; [] means it passes."""
     return audit(source, prepared, substitutions)[0]
@@ -672,7 +680,8 @@ def _check_overrides(spoken: str, breaks: list[int] = ()) -> list[str]:
             why.append("it is glued to the text around it; an override must be a whole, "
                        "separately spaced word, with at most an opening bracket or quote "
                        "before it and closing punctuation after it (override a possessive "
-                       "whole, as [Pengelley's](/…/))")
+                       "whole, as [Pengelley's](/…/), with the phonemes `phonemes` returns "
+                       "for the possessive)")
         shown_words = _tokens(shown)
         if len(shown_words) != 1:
             why.append("the displayed text must be exactly one word")
